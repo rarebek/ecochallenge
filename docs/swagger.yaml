@@ -1,0 +1,38 @@
+definitions:
+  webhandlers.ErrorResponse:
+    properties:
+      error:
+        type: string
+    type: object
+info:
+  contact: {}
+paths:
+  /question/get:
+    get:
+      consumes:
+      - application/json
+      description: This API generates 10 questions with Gemini AI providing their
+        answers too.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Get Questions
+      tags:
+      - question
+swagger: "2.0"
