@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"log"
 	"time"
+	"worker-bot/config"
 	"worker-bot/handlers"
 	"worker-bot/webhandlers"
-	"worker-bot/config"
 
 	_ "worker-bot/docs"
 
@@ -29,7 +29,7 @@ type User struct {
 }
 
 func main() {
-	connStr := "postgres://postgres:nodirbek@localhost:5432/postgres?sslmode=disable"
+	connStr := "postgres://postgres:mubina2007@localhost:5432/ecochallengedb?sslmode=disable"
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
 		log.Fatal(err)
@@ -77,8 +77,26 @@ func main() {
 
 	r := gin.Default()
 
-	r.GET("/question/get", h.TestGenHandler)
+	r.GET("/questions", h.TestGenHandler)
 	r.GET("/ranking", h.GetRanking)
+
+	r.GET("/user/:id", h.GetUser)
+	r.POST("/user", h.CreateUser)
+	r.PUT("/user/:id", h.UpdateUser)
+	r.DELETE("/user/:id", h.DeleteUser)
+	r.GET("/users", h.ListUsers)
+
+	r.GET("/event/:id", h.GetEvent)
+	r.POST("/event", h.CreateEvent)
+	r.PUT("/event/:id", h.UpdateEvent)
+	r.DELETE("/event/:id", h.DeleteEvent)
+	r.GET("/events", h.ListEvents)
+
+	r.POST("/history", h.CreateHistory)
+	r.GET("/history/:id", h.GetHistory)
+	r.PUT("/history/:id", h.UpdateHistory)
+	r.DELETE("/history/:id", h.DeleteHistory)
+	r.GET("/history", h.ListHistory)
 
 	url := ginSwagger.URL("swagger/doc.json")
 	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler, url))

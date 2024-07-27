@@ -1,4 +1,80 @@
 definitions:
+  models.Event:
+    properties:
+      created_at:
+        type: string
+      description:
+        type: string
+      end_date:
+        type: string
+      id:
+        type: string
+      image:
+        type: string
+      name:
+        type: string
+      resp_officer:
+        type: string
+      resp_officer_image:
+        type: string
+      start_date:
+        type: string
+      total_xp:
+        type: integer
+      updated_at:
+        type: string
+    type: object
+  models.History:
+    properties:
+      created_at:
+        type: string
+      end_date:
+        type: string
+      event_id:
+        type: string
+      id:
+        type: string
+      start_date:
+        type: string
+      updated_at:
+        type: string
+      user_id:
+        type: integer
+      xp_earned:
+        type: integer
+    type: object
+  models.RankingResponse:
+    properties:
+      avatar:
+        type: string
+      id:
+        type: integer
+      rank:
+        type: integer
+      user_name:
+        type: string
+      xp:
+        type: integer
+    type: object
+  models.User:
+    properties:
+      avatar:
+        type: string
+      birth_date:
+        type: string
+      first_name:
+        type: string
+      id:
+        type: integer
+      last_name:
+        type: string
+      location:
+        type: string
+      phone_number:
+        type: string
+      xp:
+        type: integer
+    type: object
   webhandlers.ErrorResponse:
     properties:
       error:
@@ -7,7 +83,312 @@ definitions:
 info:
   contact: {}
 paths:
-  /question/get:
+  /event:
+    post:
+      consumes:
+      - application/json
+      description: This API creates a new event
+      parameters:
+      - description: Event Data
+        in: body
+        name: event
+        required: true
+        schema:
+          $ref: '#/definitions/models.Event'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.Event'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Create Event
+      tags:
+      - Event
+  /event/{id}:
+    delete:
+      consumes:
+      - application/json
+      description: This API deletes an event based on the provided event ID
+      parameters:
+      - description: Event ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Delete Event
+      tags:
+      - Event
+    get:
+      consumes:
+      - application/json
+      description: This API returns event details based on the provided event ID
+      parameters:
+      - description: Event ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Event'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Get Event
+      tags:
+      - Event
+    put:
+      consumes:
+      - application/json
+      description: This API updates event details
+      parameters:
+      - description: Event ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Updated Event Data
+        in: body
+        name: event
+        required: true
+        schema:
+          $ref: '#/definitions/models.Event'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Event'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Update Event
+      tags:
+      - Event
+  /events:
+    get:
+      consumes:
+      - application/json
+      description: This API returns a list of all events
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.Event'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: List Events
+      tags:
+      - Event
+  /history:
+    get:
+      consumes:
+      - application/json
+      description: This API returns a list of all history records
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.History'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: List History
+      tags:
+      - History
+    post:
+      consumes:
+      - application/json
+      description: This API creates a new history record
+      parameters:
+      - description: History Data
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/models.History'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.History'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Create History
+      tags:
+      - History
+  /history/{id}:
+    delete:
+      consumes:
+      - application/json
+      description: This API deletes a history record based on the provided history
+        ID
+      parameters:
+      - description: History ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Delete History
+      tags:
+      - History
+    get:
+      consumes:
+      - application/json
+      description: This API returns history details based on the provided history
+        ID
+      parameters:
+      - description: History ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.History'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Get History
+      tags:
+      - History
+    put:
+      consumes:
+      - application/json
+      description: This API updates an existing history record
+      parameters:
+      - description: History ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Updated History Data
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/models.History'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.History'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Update History
+      tags:
+      - History
+  /questions:
     get:
       consumes:
       - application/json
@@ -34,5 +415,182 @@ paths:
             $ref: '#/definitions/webhandlers.ErrorResponse'
       summary: Get Questions
       tags:
-      - question
+      - Question
+  /ranking:
+    get:
+      consumes:
+      - application/json
+      description: This API returns the ranking of users based on XP
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.RankingResponse'
+            type: array
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Get Rankings
+      tags:
+      - Ranking
+  /user:
+    post:
+      consumes:
+      - application/json
+      description: This API creates a new user
+      parameters:
+      - description: User Data
+        in: body
+        name: user
+        required: true
+        schema:
+          $ref: '#/definitions/models.User'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.User'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Create User
+      tags:
+      - User
+  /user/{id}:
+    delete:
+      consumes:
+      - application/json
+      description: This API deletes a user based on the provided user ID
+      parameters:
+      - description: User ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Delete User
+      tags:
+      - User
+    get:
+      consumes:
+      - application/json
+      description: This API returns user details based on the provided user ID
+      parameters:
+      - description: User ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.User'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Get User
+      tags:
+      - User
+    put:
+      consumes:
+      - application/json
+      description: This API updates user details
+      parameters:
+      - description: User ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Updated User Data
+        in: body
+        name: user
+        required: true
+        schema:
+          $ref: '#/definitions/models.User'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.User'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Update User
+      tags:
+      - User
+  /users:
+    get:
+      consumes:
+      - application/json
+      description: This API returns a list of all users
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.User'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: List Users
+      tags:
+      - User
 swagger: "2.0"

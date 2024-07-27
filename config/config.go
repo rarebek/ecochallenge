@@ -48,9 +48,9 @@ func Load() Config {
 
 	c.PostgresHost = getEnv("POSTGRES_HOST", "localhost")
 	c.PostgresPort = getEnv("POSTGRES_PORT", "5432")
-	c.PostgresDatabase = getEnv("POSTGRES_DATABASE", "template")
+	c.PostgresDatabase = getEnv("POSTGRES_DATABASE", "ecochallengedb")
 	c.PostgresUser = getEnv("POSTGRES_USER", "postgres")
-	c.PostgresPassword = getEnv("POSTGRES_PASSWORD", "template")
+	c.PostgresPassword = getEnv("POSTGRES_PASSWORD", "mubina2007")
 
 	c.RedisHost = getEnv("REDIS_HOST", "localhost")
 	c.RedisPort = getEnv("REDIS_PORT", ":6379")
