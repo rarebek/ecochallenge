@@ -7,6 +7,7 @@ CREATE TABLE users (
     location TEXT,
     phone_number VARCHAR(20),
     xp BIGINT NOT NULL DEFAULT 0,
+    region TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -35,6 +36,31 @@ CREATE TABLE history (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS market(
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    count BIGINT NOT NULL,
+    xp BIGINT NOT NULL,
+    category_name TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO market (name, description, count, xp, category_name) VALUES
+('MacBook Pro', 'Apple MacBook Pro 16-inch', 50, 1000, 'Electronics'),
+('iPhone 13', 'Apple iPhone 13 128GB', 200, 800, 'Electronics'),
+('Samsung Galaxy S21', 'Samsung Galaxy S21 256GB', 150, 750, 'Electronics'),
+('Dell XPS 13', 'Dell XPS 13 Laptop', 100, 900, 'Electronics'),
+('Sony WH-1000XM4', 'Sony Noise Cancelling Headphones', 300, 400, 'Accessories'),
+('Apple Watch Series 7', 'Apple Watch Series 7 45mm', 250, 500, 'Wearables'),
+('iPad Pro', 'Apple iPad Pro 12.9-inch', 80, 950, 'Tablets'),
+('Google Pixel 6', 'Google Pixel 6 128GB', 180, 700, 'Electronics'),
+('Amazon Echo Dot', 'Amazon Echo Dot 4th Gen', 400, 200, 'Smart Home'),
+('Nintendo Switch', 'Nintendo Switch Console', 120, 600, 'Gaming');
+
+
 
 INSERT INTO users (id, first_name, last_name, avatar, birth_date, location, phone_number, xp)
 VALUES
@@ -74,4 +100,6 @@ VALUES
     ('c3d4e5f6-7890-1a2b-3c4d-5e6f7a8b9c8d', 8, 'b2c3d4e5-6789-0f1a-2b3c-4d5e6f7a8b9c', '2024-11-15', '2024-11-15', 65),
     ('c3d4e5f6-7890-1a2b-3c4d-5e6f7a8b9c9d', 9, 'c3d4e5f6-7890-1a2b-3c4d-5e6f7a8b9c0d', '2024-12-01', '2024-12-01', 75),
     ('c3d4e5f6-7890-1a2b-3c4d-5e6f7a869c0d', 10, 'd4e5f6a7-8901-2b3c-4d5e-6f7a8b9c0d1e', '2024-12-15', '2024-12-15', 80);
+
+
 

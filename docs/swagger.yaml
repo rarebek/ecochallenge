@@ -1,4 +1,13 @@
 definitions:
+  models.EarnXP:
+    properties:
+      correct_count:
+        type: integer
+      difficulty:
+        type: string
+      id:
+        type: string
+    type: object
   models.Event:
     properties:
       created_at:
@@ -10,6 +19,8 @@ definitions:
       id:
         type: string
       image:
+        type: string
+      location:
         type: string
       name:
         type: string
@@ -43,12 +54,40 @@ definitions:
       xp_earned:
         type: integer
     type: object
+  models.Market:
+    properties:
+      category_name:
+        type: string
+      count:
+        type: integer
+      created_at:
+        type: string
+      description:
+        type: string
+      id:
+        type: integer
+      image_url:
+        type: string
+      name:
+        type: string
+      updated_at:
+        type: string
+      xp:
+        type: integer
+    type: object
+  models.Message:
+    properties:
+      message:
+        type: string
+    type: object
   models.RankingResponse:
     properties:
       avatar:
         type: string
       id:
         type: integer
+      location:
+        type: string
       rank:
         type: integer
       user_name:
@@ -57,23 +96,6 @@ definitions:
         type: integer
     type: object
   models.User:
-    properties:
-      avatar:
-        type: string
-      birth_date:
-        type: string
-      first_name:
-        type: string
-      id:
-        type: integer
-      last_name:
-        type: string
-      location:
-        type: string
-      phone_number:
-        type: string
-      xp:
-        type: integer
     type: object
   webhandlers.ErrorResponse:
     properties:
@@ -388,12 +410,223 @@ paths:
       summary: Update History
       tags:
       - History
-  /questions:
+  /market:
+    get:
+      consumes:
+      - application/json
+      description: This API lists all market records
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.Market'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: List Markets
+      tags:
+      - Market
+    post:
+      consumes:
+      - application/json
+      description: This API creates a new market record
+      parameters:
+      - description: Market
+        in: body
+        name: market
+        required: true
+        schema:
+          $ref: '#/definitions/models.Market'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.Market'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Create Market
+      tags:
+      - Market
+  /market/{id}:
+    delete:
+      consumes:
+      - application/json
+      description: This API deletes a market record by ID
+      parameters:
+      - description: Market ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Delete Market
+      tags:
+      - Market
+    get:
+      consumes:
+      - application/json
+      description: This API retrieves a market record by ID
+      parameters:
+      - description: Market ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Market'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Get Market
+      tags:
+      - Market
+    put:
+      consumes:
+      - application/json
+      description: This API updates an existing market record
+      parameters:
+      - description: Market ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Market
+        in: body
+        name: market
+        required: true
+        schema:
+          $ref: '#/definitions/models.Market'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Market'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Update Market
+      tags:
+      - Market
+  /market/check/{userId}/{itemId}:
+    get:
+      consumes:
+      - application/json
+      description: This API checks if the user's XP is enough to buy an item from
+        the market
+      parameters:
+      - description: User ID
+        in: path
+        name: userId
+        required: true
+        type: integer
+      - description: Item ID
+        in: path
+        name: itemId
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Message'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Check User XP
+      tags:
+      - Market
+  /market/order/{userId}/{itemId}:
+    post:
+      consumes:
+      - application/json
+      description: This API allows a user to order an item from the market if they
+        have enough XP
+      parameters:
+      - description: User ID
+        in: path
+        name: userId
+        required: true
+        type: integer
+      - description: Item ID
+        in: path
+        name: itemId
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Message'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Order Item
+      tags:
+      - Market
+  /questions/{difficulty}:
     get:
       consumes:
       - application/json
       description: This API generates 10 questions with Gemini AI providing their
         answers too.
+      parameters:
+      - description: Difficulty Level
+        enum:
+        - easy
+        - medium
+        - hard
+        in: path
+        name: difficulty
+        required: true
+        type: string
       produces:
       - application/json
       responses:
@@ -591,6 +824,36 @@ paths:
           schema:
             $ref: '#/definitions/webhandlers.ErrorResponse'
       summary: List Users
+      tags:
+      - User
+  /xp:
+    post:
+      consumes:
+      - application/json
+      description: Adds XP by given data
+      parameters:
+      - description: XP Data
+        in: body
+        name: user
+        required: true
+        schema:
+          $ref: '#/definitions/models.EarnXP'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.Message'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: EarnXP
       tags:
       - User
 swagger: "2.0"

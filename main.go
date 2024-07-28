@@ -11,6 +11,7 @@ import (
 
 	_ "worker-bot/docs"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
@@ -29,7 +30,7 @@ type User struct {
 }
 
 func main() {
-	connStr := "postgres://postgres:mubina2007@localhost:5432/ecochallengedb?sslmode=disable"
+	connStr := "postgres://postgres:nodirbek@localhost:5432/ecodb?sslmode=disable"
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
 		log.Fatal(err)
@@ -58,6 +59,7 @@ func main() {
 		b.Start()
 	}()
 
+	// Configuration
 	cfg := config.Load()
 
 	psqlUrl := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
@@ -75,9 +77,19 @@ func main() {
 
 	h := webhandlers.NewHandlerV1(psqlConn)
 
+	// Gin setup
 	r := gin.Default()
 
-	r.GET("/questions", h.TestGenHandler)
+	// CORS configuration
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:     []string{"*"},                                                 // Allow all origins
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},           // Allow all methods
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"}, // Allow all headers
+		ExposeHeaders:    []string{"Content-Length", "Authorization"},                   // Headers exposed to the client
+		AllowCredentials: true,
+	}))
+
+	r.GET("/questions/:difficulty", h.TestGenHandler)
 	r.GET("/ranking", h.GetRanking)
 
 	r.GET("/user/:id", h.GetUser)
@@ -98,9 +110,17 @@ func main() {
 	r.DELETE("/history/:id", h.DeleteHistory)
 	r.GET("/history", h.ListHistory)
 
+	r.POST("/market", h.CreateMarket)
+	r.GET("/market/:id", h.GetMarket)
+	r.PUT("/market/:id", h.UpdateMarket)
+	r.DELETE("/market/:id", h.DeleteMarket)
+	r.GET("/market", h.ListMarkets)
+
+	// Swagger documentation
 	url := ginSwagger.URL("swagger/doc.json")
 	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler, url))
 
+	// Start Gin server
 	if err := r.Run(":8080"); err != nil {
 		log.Fatal("Failed to start Gin server: ", err)
 	}

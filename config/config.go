@@ -36,7 +36,6 @@ type Config struct {
 	SMTPPort      string
 }
 
-// Load loads environment vars and inflates Config
 func Load() Config {
 	c := Config{}
 
@@ -48,9 +47,9 @@ func Load() Config {
 
 	c.PostgresHost = getEnv("POSTGRES_HOST", "localhost")
 	c.PostgresPort = getEnv("POSTGRES_PORT", "5432")
-	c.PostgresDatabase = getEnv("POSTGRES_DATABASE", "ecochallengedb")
+	c.PostgresDatabase = getEnv("POSTGRES_DATABASE", "ecodb")
 	c.PostgresUser = getEnv("POSTGRES_USER", "postgres")
-	c.PostgresPassword = getEnv("POSTGRES_PASSWORD", "mubina2007")
+	c.PostgresPassword = getEnv("POSTGRES_PASSWORD", "nodirbek")
 
 	c.RedisHost = getEnv("REDIS_HOST", "localhost")
 	c.RedisPort = getEnv("REDIS_PORT", ":6379")

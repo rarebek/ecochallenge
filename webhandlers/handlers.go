@@ -1,18 +1,23 @@
 package webhandlers
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 	"worker-bot/models"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/generative-ai-go/genai"
 	"github.com/jmoiron/sqlx"
 	"github.com/k0kubun/pp"
+	"golang.org/x/exp/rand"
 	"google.golang.org/api/option"
 )
 
@@ -37,12 +42,14 @@ type Response map[string]interface{}
 // @Tags  	    Question
 // @Accept      json
 // @Produce     json
+// @Param       difficulty path string true "Difficulty Level" Enums(easy, medium, hard)
 // @Success     200 {object} ErrorResponse
 // @Failure     400 {object} ErrorResponse
 // @Failure     401 {object} ErrorResponse
 // @Failure     500 {object} ErrorResponse
-// @Router      /questions [get]
+// @Router      /questions/{difficulty} [get]
 func (h *HandlerV1) TestGenHandler(c *gin.Context) {
+	difficulty := c.Param("difficulty")
 	client, err := genai.NewClient(context.Background(), option.WithAPIKey("AIzaSyCEBU4MIMl2bMzBDR9ZPDjW-8k0JBVZEMM"))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -69,40 +76,40 @@ func (h *HandlerV1) TestGenHandler(c *gin.Context) {
 		ResponseMIMEType: "application/json",
 	}
 
-	prompt := `{
-  "tests": [
-    {
-      "1": "Which of the following is NOT a category within the broad field of Ecology?",
-      "variants": [
-        {
-          "A": "Biomes"
-        },
-        {
-          "B": "Ecosystems"
-        },
-        {
-          "C": "Biodiversity"
-        },
-        {
-          "D": "Astrophysics"
+	prompt := fmt.Sprintf(`{
+        "tests": [
+            {
+                "question": "Which of the following is NOT a category within the broad field of Ecology?",
+                "variants": [
+                    {
+                        "A": "Biomes"
+                    },
+                    {
+                        "B": "Ecosystems"
+                    },
+                    {
+                        "C": "Biodiversity"
+                    },
+                    {
+                        "D": "Astrophysics"
+                    }
+                ]
+            }
+        ],
+        "answers": {
+            "1": "A",
+            "2": "B",
+            "3": "C",
+            "4": "D",
+            "5": "A",
+            "6": "B",
+            "7": "C",
+            "8": "D",
+            "9": "A",
+            "10": "B"
         }
-      ]
     }
-  ],
-  "answers": {
-    "1": "A",
-    "2": "B",
-    "3": "C",
-    "4": "D",
-    "5": "A",
-    "6": "B",
-    "7": "C",
-    "8": "D",
-    "9": "A",
-    "10": "B"
-  }
-}
-GENERATE ME 10 RANDOM ECOLOGY TESTS APPLYING THIS FORMAT ABOVE. QUESTION NUMBERS ARE DYNAMIC. QUESTIONS MUST BE VERY EASY AND FOR COMMON NATION. NOT FOR PROFESSORS.`
+    GENERATE ME 10 RANDOM ECOLOGY TESTS APPLYING THIS FORMAT ABOVE. QUESTION NUMBERS ARE DYNAMIC. I WILL GIVE YOU DIFFICULTY OF QUESTIONS. IT MAY BE EASY, MEDIUM or HARD. So DIFFICULTY LEVEL IS: %s`, difficulty)
 
 	resp, err := model.GenerateContent(context.Background(), genai.Text(prompt))
 	if err != nil {
@@ -116,7 +123,6 @@ GENERATE ME 10 RANDOM ECOLOGY TESTS APPLYING THIS FORMAT ABOVE. QUESTION NUMBERS
 		c.JSON(http.StatusNoContent, gin.H{
 			"error": "No content from Gemini",
 		})
-
 		return
 	}
 
@@ -127,21 +133,109 @@ GENERATE ME 10 RANDOM ECOLOGY TESTS APPLYING THIS FORMAT ABOVE. QUESTION NUMBERS
 
 	unescapedData, err := strconv.Unquote(string(temp))
 	if err != nil {
-		pp.Println(err)
+		log.Fatal(err)
 	}
 
-	var carbine map[string]interface{}
-	err = json.Unmarshal([]byte(unescapedData), &carbine)
+	var questions map[string]interface{}
+	err = json.Unmarshal([]byte(unescapedData), &questions)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Error while unmarshaling answer to map",
+			"error": "Error while unmarshaling answer to map" + err.Error(),
 		})
-
 		return
 	}
 
-	c.JSON(http.StatusOK, carbine)
+	// Extract questions and variants for translation
+	tests := questions["tests"].([]interface{})
+	var texts []string
+	for _, test := range tests {
+		question := test.(map[string]interface{})["question"].(string)
+		texts = append(texts, question)
+		for _, variant := range test.(map[string]interface{})["variants"].([]interface{}) {
+			for _, variantValue := range variant.(map[string]interface{}) {
+				texts = append(texts, variantValue.(string))
+			}
+		}
+	}
 
+	translatedTexts, err := translateTexts(texts)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Error while translating questions" + err.Error(),
+		})
+		return
+	}
+
+	textIndex := 0
+	for _, test := range tests {
+		test.(map[string]interface{})["question"] = translatedTexts[textIndex]
+		textIndex++
+		for _, variant := range test.(map[string]interface{})["variants"].([]interface{}) {
+			for variantKey := range variant.(map[string]interface{}) {
+				variant.(map[string]interface{})[variantKey] = translatedTexts[textIndex]
+				textIndex++
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, questions)
+}
+func translateTexts(texts []string) ([]string, error) {
+	url := "https://websocket.tahrirchi.uz/translate"
+	payload := map[string]interface{}{
+		"text": map[string]interface{}{
+			"texts": texts,
+		},
+		"source_lang": "eng_Latn",
+		"target_lang": "uzn_Latn",
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "389eebc7-4e87-4c59-b0c0-d1a1f1c0aacc")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Printf("Translation service response: %s", string(body))
+
+	var response map[string]interface{}
+	err = json.Unmarshal(body, &response)
+	if err != nil {
+		return nil, err
+	}
+
+	sentences, ok := response["sentences"].([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("unexpected response format")
+	}
+
+	var translatedTexts []string
+	for _, sentence := range sentences {
+		translatedText, ok := sentence.(map[string]interface{})["translated"].(string)
+		if !ok {
+			return nil, fmt.Errorf("unexpected sentence format")
+		}
+		translatedTexts = append(translatedTexts, translatedText)
+	}
+
+	return translatedTexts, nil
 }
 
 // @Summary     Get Rankings
@@ -155,9 +249,10 @@ GENERATE ME 10 RANDOM ECOLOGY TESTS APPLYING THIS FORMAT ABOVE. QUESTION NUMBERS
 // @Router      /ranking [get]
 func (h *HandlerV1) GetRanking(c *gin.Context) {
 	var users []models.User
-	err := h.db.Select(&users, "SELECT id, first_name, last_name, avatar, xp FROM users ORDER BY xp DESC")
+	err := h.db.Select(&users, "SELECT id, first_name, last_name, avatar, xp, location FROM users ORDER BY xp DESC")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching data"})
+		pp.Println(err.Error())
 		return
 	}
 
@@ -168,11 +263,12 @@ func (h *HandlerV1) GetRanking(c *gin.Context) {
 			Rank:     i + 1,
 			UserName: user.FirstName + " " + user.LastName,
 			XP:       user.XP,
-			Avatar:   user.Avatar,
+			Avatar:   "https://i.pravatar.cc/150?img=" + strconv.Itoa(i),
+			Location: user.Location,
 		}
 	}
 
-	c.JSON(http.StatusOK, rankings)
+	c.JSON(http.StatusOK, gin.H{"rankings": rankings})
 }
 
 //User------------------------------
@@ -204,6 +300,50 @@ func (h *HandlerV1) CreateUser(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, user)
+}
+
+// @Summary		EarnXP
+// @Description Adds XP by given data
+// @Tags         User
+// @Accept       json
+// @Produce      json
+// @Param        user  body models.EarnXP  true  "XP Data"
+// @Success      201   {object} models.Message
+// @Failure      400   {object} ErrorResponse
+// @Failure      500   {object} ErrorResponse
+// @Router       /xp [post]
+func (h *HandlerV1) EarnXP(c *gin.Context) {
+	var xp models.EarnXP
+	if err := c.ShouldBindJSON(&xp); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		return
+	}
+
+	var maxXP int
+	switch xp.Difficulty {
+	case "easy":
+		maxXP = 5
+	case "medium":
+		maxXP = 10
+	case "hard":
+		maxXP = 15
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid difficulty level"})
+		return
+	}
+
+	totalQuestions := 10
+
+	totalXP := (xp.CorrectCount * maxXP) / totalQuestions
+
+	query := `UPDATE users SET xp = xp + $1 WHERE id = $2`
+	_, err := h.db.Exec(query, totalXP, xp.Id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update XP"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "XP earned successfully", "earnedXP": totalXP})
 }
 
 // @Summary     Update User
@@ -318,8 +458,7 @@ func (h *HandlerV1) DeleteUser(c *gin.Context) {
 // @Failure      500  {object} ErrorResponse
 // @Router       /users [get]
 func (h *HandlerV1) ListUsers(c *gin.Context) {
-	query := `SELECT id, first_name, last_name, avatar, birth_date, location, phone_number, xp FROM users`
-
+	query := `SELECT id, first_name, last_name, birth_date, location, phone_number, xp FROM users`
 	var users []models.User
 	err := h.db.Select(&users, query)
 	if err != nil {
@@ -328,7 +467,11 @@ func (h *HandlerV1) ListUsers(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, users)
+	for key := range users {
+		users[key].Avatar = "https://i.pravatar.cc/150?img=" + strconv.Itoa(users[key].ID)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"users": users})
 }
 
 //Event------------------------------
@@ -476,10 +619,10 @@ func (h *HandlerV1) GetEvent(c *gin.Context) {
 // @Failure      500  {object} ErrorResponse
 // @Router       /events [get]
 func (h *HandlerV1) ListEvents(c *gin.Context) {
-	query := `SELECT id, name, description, 
+	query := `SELECT id, image, name, description, 
 				total_xp, start_date, end_date, 
 				resp_officer, resp_officer_image, 
-				created_at, updated_at FROM events`
+				created_at, updated_at, location FROM events`
 
 	var events []models.Event
 	err := h.db.Select(&events, query)
@@ -489,7 +632,11 @@ func (h *HandlerV1) ListEvents(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, events)
+	for i := range events {
+		events[i].RespOfficerImage = "https://i.pravatar.cc/150?img=" + strconv.Itoa(i)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"events": events})
 }
 
 //History------------------------------
@@ -515,8 +662,8 @@ func (h *HandlerV1) CreateHistory(c *gin.Context) {
 	 start_date, end_date, xp_earned, created_at, updated_at) 
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`
 	_, err := h.db.Exec(query, history.ID, history.UserID,
-						 history.EventID, history.StartDate, history.EndDate, 
-						 history.XPEarned, history.CreatedAt, history.UpdatedAt)
+		history.EventID, history.StartDate, history.EndDate,
+		history.XPEarned, history.CreatedAt, history.UpdatedAt)
 	if err != nil {
 		log.Printf("Error creating history record: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error creating history record"})
@@ -582,7 +729,7 @@ func (h *HandlerV1) UpdateHistory(c *gin.Context) {
 				end_date = $4, xp_earned = $5, updated_at = $6 
 				WHERE id = $7`
 	_, err := h.db.Exec(query, history.UserID, history.EventID, history.StartDate,
-				 history.EndDate, history.XPEarned, history.UpdatedAt, id)
+		history.EndDate, history.XPEarned, history.UpdatedAt, id)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "History record not found"})
@@ -654,4 +801,278 @@ func (h *HandlerV1) ListHistory(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, history)
+}
+
+// CreateMarket creates a new market record
+// @Summary     Create Market
+// @Description This API creates a new market record
+// @Tags         Market
+// @Accept       json
+// @Produce      json
+// @Param        market body models.Market true "Market"
+// @Success      201  {object} models.Market
+// @Failure      500  {object} ErrorResponse
+// @Router       /market [post]
+func (h *HandlerV1) CreateMarket(c *gin.Context) {
+	var market models.Market
+	if err := c.ShouldBindJSON(&market); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	market.CreatedAt = time.Now()
+	market.UpdatedAt = time.Now()
+
+	query := `INSERT INTO market (name, description, count, xp, category_name, created_at, updated_at) 
+              VALUES (:name, :description, :count, :xp, :category_name, :created_at, :updated_at) RETURNING id`
+	stmt, err := h.db.PrepareNamed(query)
+	if err != nil {
+		log.Printf("Error preparing query: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error preparing query"})
+		return
+	}
+
+	err = stmt.Get(&market.ID, market)
+	if err != nil {
+		log.Printf("Error inserting market record: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error inserting market record"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, market)
+}
+
+// GetMarket retrieves a market record by ID
+// @Summary     Get Market
+// @Description This API retrieves a market record by ID
+// @Tags         Market
+// @Accept       json
+// @Produce      json
+// @Param        id path int true "Market ID"
+// @Success      200  {object} models.Market
+// @Failure      404  {object} ErrorResponse
+// @Router       /market/{id} [get]
+func (h *HandlerV1) GetMarket(c *gin.Context) {
+	id := c.Param("id")
+	var market models.Market
+
+	query := `SELECT id, name, description, count, xp, category_name, created_at, updated_at FROM market WHERE id = $1`
+	err := h.db.Get(&market, query, id)
+	if err != nil {
+		log.Printf("Error fetching market record: %v", err)
+		c.JSON(http.StatusNotFound, gin.H{"error": "Market record not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, market)
+}
+
+// UpdateMarket updates an existing market record
+// @Summary     Update Market
+// @Description This API updates an existing market record
+// @Tags         Market
+// @Accept       json
+// @Produce      json
+// @Param        id path int true "Market ID"
+// @Param        market body models.Market true "Market"
+// @Success      200  {object} models.Market
+// @Failure      500  {object} ErrorResponse
+// @Router       /market/{id} [put]
+func (h *HandlerV1) UpdateMarket(c *gin.Context) {
+	id := c.Param("id")
+	var market models.Market
+	if err := c.ShouldBindJSON(&market); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	market.UpdatedAt = time.Now()
+
+	query := `UPDATE market SET name = :name, description = :description, count = :count, xp = :xp, 
+              category_name = :category_name, updated_at = :updated_at WHERE id = :id`
+	stmt, err := h.db.PrepareNamed(query)
+	if err != nil {
+		log.Printf("Error preparing query: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error preparing query"})
+		return
+	}
+	idInt, err := strconv.Atoi(id)
+	if err != nil {
+		log.Printf("Error preparing query: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error preparing query"})
+		return
+	}
+	market.ID = int64(idInt)
+	_, err = stmt.Exec(market)
+	if err != nil {
+		log.Printf("Error updating market record: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error updating market record"})
+		return
+	}
+
+	c.JSON(http.StatusOK, market)
+}
+
+// DeleteMarket deletes a market record by ID
+// @Summary     Delete Market
+// @Description This API deletes a market record by ID
+// @Tags         Market
+// @Accept       json
+// @Produce      json
+// @Param        id path int true "Market ID"
+// @Success      204  {object} nil
+// @Failure      500  {object} ErrorResponse
+// @Router       /market/{id} [delete]
+func (h *HandlerV1) DeleteMarket(c *gin.Context) {
+	id := c.Param("id")
+
+	query := `DELETE FROM market WHERE id = $1`
+	_, err := h.db.Exec(query, id)
+	if err != nil {
+		log.Printf("Error deleting market record: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error deleting market record"})
+		return
+	}
+
+	c.JSON(http.StatusNoContent, nil)
+}
+
+// ListMarkets lists all market records
+// @Summary     List Markets
+// @Description This API lists all market records
+// @Tags         Market
+// @Accept       json
+// @Produce      json
+// @Success      200  {array} models.Market
+// @Failure      500  {object} ErrorResponse
+// @Router       /market [get]
+func (h *HandlerV1) ListMarkets(c *gin.Context) {
+	var markets []models.Market
+
+	query := `SELECT id, name, description, count, xp, category_name, created_at, updated_at, image_url FROM market`
+	err := h.db.Select(&markets, query)
+	if err != nil {
+		log.Printf("Error fetching market records: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching market records"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"products": markets})
+}
+
+// CheckUserXP checks if the user's XP is enough to buy an item from the market
+// @Summary     Check User XP
+// @Description This API checks if the user's XP is enough to buy an item from the market
+// @Tags         Market
+// @Accept       json
+// @Produce      json
+// @Param        userId path int true "User ID"
+// @Param        itemId path int true "Item ID"
+// @Success      200  {object} models.Message
+// @Failure      400  {object} ErrorResponse
+// @Failure      404  {object} ErrorResponse
+// @Failure      500  {object} ErrorResponse
+// @Router       /market/check/{userId}/{itemId} [get]
+func (h *HandlerV1) CheckUserXP(c *gin.Context) {
+	userId := c.Param("userId")
+	itemId := c.Param("itemId")
+
+	var user models.User
+	userQuery := "SELECT xp FROM users WHERE id = $1"
+	err := h.db.Get(&user, userQuery, userId)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching user data"})
+		}
+		return
+	}
+	var item models.Market
+	itemQuery := "SELECT xp FROM market WHERE id = $1"
+	err = h.db.Get(&item, itemQuery, itemId)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Item not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching item data"})
+		}
+		return
+	}
+
+	if user.XP >= int(item.XP) {
+		c.JSON(http.StatusOK, gin.H{"can_buy": true})
+	} else {
+		c.JSON(http.StatusOK, gin.H{"can_buy": false})
+	}
+}
+
+// OrderItem handles the order process for a user
+// @Summary     Order Item
+// @Description This API allows a user to order an item from the market if they have enough XP
+// @Tags         Market
+// @Accept       json
+// @Produce      json
+// @Param        userId path int true "User ID"
+// @Param        itemId path int true "Item ID"
+// @Success      200  {object} models.Message
+// @Failure      400  {object} ErrorResponse
+// @Failure      404  {object} ErrorResponse
+// @Failure      500  {object} ErrorResponse
+// @Router       /market/order/{userId}/{itemId} [post]
+func (h *HandlerV1) OrderItem(c *gin.Context) {
+	userId := c.Param("userId")
+	itemId := c.Param("itemId")
+
+	var user models.User
+	userQuery := "SELECT id, xp FROM users WHERE id = $1"
+	err := h.db.Get(&user, userQuery, userId)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching user data"})
+		}
+		return
+	}
+	var item models.Market
+	itemQuery := "SELECT id, xp FROM market WHERE id = $1"
+	err = h.db.Get(&item, itemQuery, itemId)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Item not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching item data"})
+		}
+		return
+	}
+
+	if user.XP < int(item.XP) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Not enough XP"})
+		return
+	}
+
+	newXP := user.XP - int(item.XP)
+	updateUserQuery := "UPDATE users SET xp = $1 WHERE id = $2"
+	_, err = h.db.Exec(updateUserQuery, newXP, userId)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error updating user XP"})
+		return
+	}
+	orderNumber := rand.Intn(90000) + 10000 // Generates a number between 10000 and 99999
+
+	order := models.Order{
+		UserID:      user.ID,
+		ItemID:      int(item.ID),
+		OrderNumber: orderNumber,
+		CreatedAt:   time.Now(),
+	}
+	orderQuery := `INSERT INTO orders (user_id, item_id, order_number, created_at) VALUES ($1, $2, $3, $4)`
+	_, err = h.db.Exec(orderQuery, order.UserID, order.ItemID, order.OrderNumber, order.CreatedAt)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error creating order"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Order placed successfully", "order_number": orderNumber})
 }

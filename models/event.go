@@ -12,4 +12,5 @@ type Event struct {
 	RespOfficerImage string `db:"resp_officer_image" json:"resp_officer_image"`
 	CreatedAt        string `db:"created_at" json:"created_at"`
 	UpdatedAt        string `db:"updated_at" json:"updated_at"`
+	Location         string `json:"location"`
 }

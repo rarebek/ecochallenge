@@ -3,6 +3,7 @@ module worker-bot
 go 1.22.4
 
 require (
+	github.com/gin-contrib/cors v1.7.2
 	github.com/gin-gonic/gin v1.10.0
 	github.com/google/generative-ai-go v0.17.0
 	github.com/jmoiron/sqlx v1.4.0
@@ -11,6 +12,7 @@ require (
 	github.com/swaggo/files v1.0.1
 	github.com/swaggo/gin-swagger v1.6.0
 	github.com/swaggo/swag v1.16.3
+	golang.org/x/exp v0.0.0-20200224162631-6cc2880d07d6
 	google.golang.org/api v0.186.0
 	gopkg.in/telebot.v3 v3.3.6
 )
