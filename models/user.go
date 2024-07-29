@@ -50,7 +50,7 @@ type Message struct {
 }
 
 type EarnXP struct {
-	Id           string `json:"id"`
+	Id           int    `json:"id"`
 	Difficulty   string `json:"difficulty"`
 	CorrectCount int    `json:"correct_count"`
 }

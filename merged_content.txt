@@ -1,0 +1,3891 @@
+#### ./webhandlers/handlers.go ####
+package webhandlers
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"log"
+	"net/http"
+	"strconv"
+	"time"
+	"worker-bot/models"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/generative-ai-go/genai"
+	"github.com/jmoiron/sqlx"
+	"github.com/k0kubun/pp"
+	"golang.org/x/exp/rand"
+	"google.golang.org/api/option"
+)
+
+type HandlerV1 struct {
+	db *sqlx.DB
+}
+
+func NewHandlerV1(db *sqlx.DB) *HandlerV1 {
+	return &HandlerV1{
+		db: db,
+	}
+}
+
+type ErrorResponse struct {
+	Error string `json:"error"`
+}
+
+type Response map[string]interface{}
+
+// @Summary     Get Questions
+// @Description This API generates 10 questions with Gemini AI providing their answers too.
+// @Tags  	    Question
+// @Accept      json
+// @Produce     json
+// @Param       difficulty path string true "Difficulty Level" Enums(easy, medium, hard)
+// @Success     200 {object} ErrorResponse
+// @Failure     400 {object} ErrorResponse
+// @Failure     401 {object} ErrorResponse
+// @Failure     500 {object} ErrorResponse
+// @Router      /questions/{difficulty} [get]
+func (h *HandlerV1) TestGenHandler(c *gin.Context) {
+	difficulty := c.Param("difficulty")
+	client, err := genai.NewClient(context.Background(), option.WithAPIKey("AIzaSyCEBU4MIMl2bMzBDR9ZPDjW-8k0JBVZEMM"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Error while creating a new client",
+		})
+		return
+	}
+	defer client.Close()
+
+	model := client.GenerativeModel("gemini-1.5-flash")
+
+	model.SafetySettings = []*genai.SafetySetting{
+		{
+			Category:  genai.HarmCategoryHarassment,
+			Threshold: genai.HarmBlockOnlyHigh,
+		},
+		{
+			Category:  genai.HarmCategoryDangerousContent,
+			Threshold: genai.HarmBlockOnlyHigh,
+		},
+	}
+
+	model.GenerationConfig = genai.GenerationConfig{
+		ResponseMIMEType: "application/json",
+	}
+
+	prompt := fmt.Sprintf(`{
+        "tests": [
+            {
+                "question": "Which of the following is NOT a category within the broad field of Ecology?",
+                "variants": [
+                    {
+                        "A": "Biomes"
+                    },
+                    {
+                        "B": "Ecosystems"
+                    },
+                    {
+                        "C": "Biodiversity"
+                    },
+                    {
+                        "D": "Astrophysics"
+                    }
+                ]
+            }
+        ],
+        "answers": {
+            "1": "A",
+            "2": "B",
+            "3": "C",
+            "4": "D",
+            "5": "A",
+            "6": "B",
+            "7": "C",
+            "8": "D",
+            "9": "A",
+            "10": "B"
+        }
+    }
+    GENERATE ME 10 RANDOM ECOLOGY TESTS APPLYING THIS FORMAT ABOVE. QUESTION NUMBERS ARE DYNAMIC. I WILL GIVE YOU DIFFICULTY OF QUESTIONS. IT MAY BE EASY, MEDIUM or HARD. So DIFFICULTY LEVEL IS: %s`, difficulty)
+
+	resp, err := model.GenerateContent(context.Background(), genai.Text(prompt))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Error while generating tests",
+		})
+		return
+	}
+
+	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
+		c.JSON(http.StatusNoContent, gin.H{
+			"error": "No content from Gemini",
+		})
+		return
+	}
+
+	temp, err := json.Marshal(resp.Candidates[0].Content.Parts[0])
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	unescapedData, err := strconv.Unquote(string(temp))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var questions map[string]interface{}
+	err = json.Unmarshal([]byte(unescapedData), &questions)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Error while unmarshaling answer to map" + err.Error(),
+		})
+		return
+	}
+
+	// Extract questions and variants for translation
+	tests := questions["tests"].([]interface{})
+	var texts []string
+	for _, test := range tests {
+		question := test.(map[string]interface{})["question"].(string)
+		texts = append(texts, question)
+		for _, variant := range test.(map[string]interface{})["variants"].([]interface{}) {
+			for _, variantValue := range variant.(map[string]interface{}) {
+				texts = append(texts, variantValue.(string))
+			}
+		}
+	}
+
+	translatedTexts, err := translateTexts(texts)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Error while translating questions" + err.Error(),
+		})
+		return
+	}
+
+	textIndex := 0
+	for _, test := range tests {
+		test.(map[string]interface{})["question"] = translatedTexts[textIndex]
+		textIndex++
+		for _, variant := range test.(map[string]interface{})["variants"].([]interface{}) {
+			for variantKey := range variant.(map[string]interface{}) {
+				variant.(map[string]interface{})[variantKey] = translatedTexts[textIndex]
+				textIndex++
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, questions)
+}
+func translateTexts(texts []string) ([]string, error) {
+	url := "https://websocket.tahrirchi.uz/translate"
+	payload := map[string]interface{}{
+		"text": map[string]interface{}{
+			"texts": texts,
+		},
+		"source_lang": "eng_Latn",
+		"target_lang": "uzn_Latn",
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "389eebc7-4e87-4c59-b0c0-d1a1f1c0aacc")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Printf("Translation service response: %s", string(body))
+
+	var response map[string]interface{}
+	err = json.Unmarshal(body, &response)
+	if err != nil {
+		return nil, err
+	}
+
+	sentences, ok := response["sentences"].([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("unexpected response format")
+	}
+
+	var translatedTexts []string
+	for _, sentence := range sentences {
+		translatedText, ok := sentence.(map[string]interface{})["translated"].(string)
+		if !ok {
+			return nil, fmt.Errorf("unexpected sentence format")
+		}
+		translatedTexts = append(translatedTexts, translatedText)
+	}
+
+	return translatedTexts, nil
+}
+
+// @Summary     Get Rankings
+// @Description This API returns the ranking of users based on XP
+// @Tags  	    Ranking
+// @Accept      json
+// @Produce     json
+// @Success     200 {object} []models.RankingResponse
+// @Failure     400 {object} ErrorResponse
+// @Failure     500 {object} ErrorResponse
+// @Router      /ranking [get]
+func (h *HandlerV1) GetRanking(c *gin.Context) {
+	var users []models.User
+	err := h.db.Select(&users, "SELECT id, first_name, last_name, avatar, xp, location FROM users ORDER BY xp DESC")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching data"})
+		pp.Println(err.Error())
+		return
+	}
+
+	rankings := make([]models.RankingResponse, len(users))
+	for i, user := range users {
+		rankings[i] = models.RankingResponse{
+			ID:       user.ID,
+			Rank:     i + 1,
+			UserName: user.FirstName + " " + user.LastName,
+			XP:       user.XP,
+			Avatar:   "https://i.pravatar.cc/150?img=" + strconv.Itoa(i),
+			Location: user.Location,
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"rankings": rankings})
+}
+
+//User------------------------------
+
+// @Summary     Create User
+// @Description This API creates a new user
+// @Tags         User
+// @Accept       json
+// @Produce      json
+// @Param        user  body models.User  true  "User Data"
+// @Success      201   {object} models.User
+// @Failure      400   {object} ErrorResponse
+// @Failure      500   {object} ErrorResponse
+// @Router       /user [post]
+func (h *HandlerV1) CreateUser(c *gin.Context) {
+	var user models.User
+	if err := c.BindJSON(&user); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		return
+	}
+
+	query := `INSERT INTO users (id, first_name, last_name, avatar, birth_date, location, phone_number, xp) 
+			  VALUES (:id, :first_name, :last_name, :avatar, :birth_date, :location, :phone_number, :xp)`
+
+	_, err := h.db.NamedExec(query, user)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error creating user"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, user)
+}
+
+// @Summary		EarnXP
+// @Description Adds XP by given data
+// @Tags         User
+// @Accept       json
+// @Produce      json
+// @Param        user  body models.EarnXP  true  "XP Data"
+// @Success      201   {object} models.Message
+// @Failure      400   {object} ErrorResponse
+// @Failure      500   {object} ErrorResponse
+// @Router       /xp [post]
+func (h *HandlerV1) EarnXP(c *gin.Context) {
+	var xp models.EarnXP
+	if err := c.ShouldBindJSON(&xp); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		return
+	}
+
+	var maxXP int
+	switch xp.Difficulty {
+	case "easy":
+		maxXP = 5
+	case "medium":
+		maxXP = 10
+	case "hard":
+		maxXP = 15
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid difficulty level"})
+		return
+	}
+
+	totalQuestions := 10
+
+	totalXP := (xp.CorrectCount * maxXP) / totalQuestions
+
+	query := `UPDATE users SET xp = xp + $1 WHERE id = $2`
+	_, err := h.db.Exec(query, totalXP, xp.Id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update XP"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "XP earned successfully", "earnedXP": totalXP})
+}
+
+// @Summary     Update User
+// @Description This API updates user details
+// @Tags         User
+// @Accept       json
+// @Produce      json
+// @Param        id    path int    true  "User ID"
+// @Param        user  body models.User  true  "Updated User Data"
+// @Success      200   {object} models.User
+// @Failure      400   {object} ErrorResponse
+// @Failure      404   {object} ErrorResponse
+// @Failure      500   {object} ErrorResponse
+// @Router       /user/{id} [put]
+func (h *HandlerV1) UpdateUser(c *gin.Context) {
+	id := c.Param("id")
+	var user models.User
+	if err := c.BindJSON(&user); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		return
+	}
+
+	query := `UPDATE users SET first_name = :first_name, last_name = :last_name, avatar = :avatar, 
+			  birth_date = :birth_date, location = :location, phone_number = :phone_number, 
+			  xp = :xp, updated_at = CURRENT_TIMESTAMP WHERE id = :id`
+
+	_, err := h.db.NamedExec(query, map[string]interface{}{
+		"id":           id,
+		"first_name":   user.FirstName,
+		"last_name":    user.LastName,
+		"avatar":       user.Avatar,
+		"birth_date":   user.BirthDate,
+		"location":     user.Location,
+		"phone_number": user.PhoneNumber,
+		"xp":           user.XP,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error updating user"})
+		return
+	}
+
+	c.JSON(http.StatusOK, user)
+}
+
+// @Summary     Get User
+// @Description This API returns user details based on the provided user ID
+// @Tags         User
+// @Accept       json
+// @Produce      json
+// @Param        id   path int  true  "User ID"
+// @Success      200  {object} models.User
+// @Failure      400  {object} ErrorResponse
+// @Failure      404  {object} ErrorResponse
+// @Failure      500  {object} ErrorResponse
+// @Router       /user/{id} [get]
+func (h *HandlerV1) GetUser(c *gin.Context) {
+	id := c.Param("id")
+	query := `SELECT id, first_name, 
+						last_name, avatar, 
+						birth_date, location, 
+						phone_number, xp FROM users WHERE id = $1`
+
+	var user models.User
+	err := h.db.Get(&user, query, id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		} else {
+			log.Printf("Error fetching user data: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching user data"})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, user)
+}
+
+// @Summary     Delete User
+// @Description This API deletes a user based on the provided user ID
+// @Tags         User
+// @Accept       json
+// @Produce      json
+// @Param        id  path int  true  "User ID"
+// @Success      204
+// @Failure      400  {object} ErrorResponse
+// @Failure      404  {object} ErrorResponse
+// @Failure      500  {object} ErrorResponse
+// @Router       /user/{id} [delete]
+func (h *HandlerV1) DeleteUser(c *gin.Context) {
+	id := c.Param("id")
+	query := `DELETE FROM users WHERE id = $1`
+
+	_, err := h.db.Exec(query, id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error deleting user"})
+		}
+		return
+	}
+
+	c.Status(http.StatusNoContent)
+}
+
+// @Summary     List Users
+// @Description This API returns a list of all users
+// @Tags         User
+// @Accept       json
+// @Produce      json
+// @Success      200  {array} models.User
+// @Failure      500  {object} ErrorResponse
+// @Router       /users [get]
+func (h *HandlerV1) ListUsers(c *gin.Context) {
+	query := `SELECT id, first_name, last_name, birth_date, location, phone_number, xp FROM users`
+	var users []models.User
+	err := h.db.Select(&users, query)
+	if err != nil {
+		log.Printf("Error fetching users: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching users"})
+		return
+	}
+
+	for key := range users {
+		users[key].Avatar = "https://i.pravatar.cc/150?img=" + strconv.Itoa(users[key].ID)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"users": users})
+}
+
+//Event------------------------------
+
+// @Summary     Create Event
+// @Description This API creates a new event
+// @Tags         Event
+// @Accept       json
+// @Produce      json
+// @Param        event  body models.Event  true  "Event Data"
+// @Success      201    {object} models.Event
+// @Failure      400    {object} ErrorResponse
+// @Failure      500    {object} ErrorResponse
+// @Router       /event [post]
+func (h *HandlerV1) CreateEvent(c *gin.Context) {
+	var event models.Event
+	if err := c.BindJSON(&event); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		return
+	}
+
+	query := `INSERT INTO events (id, image, name, description, total_xp, 
+								start_date, end_date, resp_officer, resp_officer_image) 
+			  					VALUES (:id, :image, :name, :description, :total_xp, :start_date, :end_date, :resp_officer, :resp_officer_image)`
+
+	_, err := h.db.NamedExec(query, event)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error creating event"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, event)
+}
+
+// @Summary     Update Event
+// @Description This API updates event details
+// @Tags         Event
+// @Accept       json
+// @Produce      json
+// @Param        id     path string  true  "Event ID"
+// @Param        event  body models.Event  true  "Updated Event Data"
+// @Success      200    {object} models.Event
+// @Failure      400    {object} ErrorResponse
+// @Failure      404    {object} ErrorResponse
+// @Failure      500    {object} ErrorResponse
+// @Router       /event/{id} [put]
+func (h *HandlerV1) UpdateEvent(c *gin.Context) {
+	id := c.Param("id")
+	var event models.Event
+	if err := c.BindJSON(&event); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		return
+	}
+
+	query := `UPDATE events SET image = :image, name = :name, description = :description, total_xp = :total_xp, 
+			  start_date = :start_date, end_date = :end_date, resp_officer = :resp_officer, 
+			  resp_officer_image = :resp_officer_image, updated_at = CURRENT_TIMESTAMP 
+			  WHERE id = :id`
+
+	_, err := h.db.NamedExec(query, map[string]interface{}{
+		"id":                 id,
+		"image":              event.Image,
+		"name":               event.Name,
+		"description":        event.Description,
+		"total_xp":           event.TotalXP,
+		"start_date":         event.StartDate,
+		"end_date":           event.EndDate,
+		"resp_officer":       event.RespOfficer,
+		"resp_officer_image": event.RespOfficerImage,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error updating event"})
+		return
+	}
+
+	c.JSON(http.StatusOK, event)
+}
+
+// @Summary     Delete Event
+// @Description This API deletes an event based on the provided event ID
+// @Tags         Event
+// @Accept       json
+// @Produce      json
+// @Param        id  path string  true  "Event ID"
+// @Success      204
+// @Failure      400  {object} ErrorResponse
+// @Failure      404  {object} ErrorResponse
+// @Failure      500  {object} ErrorResponse
+// @Router       /event/{id} [delete]
+func (h *HandlerV1) DeleteEvent(c *gin.Context) {
+	id := c.Param("id")
+	query := `DELETE FROM events WHERE id = $1`
+
+	_, err := h.db.Exec(query, id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Event not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error deleting event"})
+		}
+		return
+	}
+
+	c.Status(http.StatusNoContent)
+}
+
+// @Summary     Get Event
+// @Description This API returns event details based on the provided event ID
+// @Tags         Event
+// @Accept       json
+// @Produce      json
+// @Param        id   path string  true  "Event ID"
+// @Success      200  {object} models.Event
+// @Failure      400  {object} ErrorResponse
+// @Failure      404  {object} ErrorResponse
+// @Failure      500  {object} ErrorResponse
+// @Router       /event/{id} [get]
+func (h *HandlerV1) GetEvent(c *gin.Context) {
+	id := c.Param("id")
+	query := `SELECT id, name, description, total_xp, start_date, 
+		end_date, resp_officer, resp_officer_image, created_at, updated_at 
+              FROM events WHERE id = $1`
+
+	var event models.Event
+	err := h.db.Get(&event, query, id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Event not found"})
+		} else {
+			log.Printf("Error fetching event data: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching event data"})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, event)
+}
+
+// @Summary     List Events
+// @Description This API returns a list of all events
+// @Tags         Event
+// @Accept       json
+// @Produce      json
+// @Success      200  {array} models.Event
+// @Failure      500  {object} ErrorResponse
+// @Router       /events [get]
+func (h *HandlerV1) ListEvents(c *gin.Context) {
+	query := `SELECT id, image, name, description, 
+				total_xp, start_date, end_date, 
+				resp_officer, resp_officer_image, 
+				created_at, updated_at, location FROM events`
+
+	var events []models.Event
+	err := h.db.Select(&events, query)
+	if err != nil {
+		log.Printf("Error fetching events: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching events"})
+		return
+	}
+
+	for i := range events {
+		events[i].RespOfficerImage = "https://i.pravatar.cc/150?img=" + strconv.Itoa(i)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"events": events})
+}
+
+//History------------------------------
+
+// @Summary     Create History
+// @Description This API creates a new history record
+// @Tags         History
+// @Accept       json
+// @Produce      json
+// @Param        body body models.History true "History Data"
+// @Success      201  {object} models.History
+// @Failure      400  {object} ErrorResponse
+// @Failure      500  {object} ErrorResponse
+// @Router       /history [post]
+func (h *HandlerV1) CreateHistory(c *gin.Context) {
+	var history models.History
+	if err := c.ShouldBindJSON(&history); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		return
+	}
+
+	query := `INSERT INTO history (id, user_id, event_id,
+	 start_date, end_date, xp_earned, created_at, updated_at) 
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`
+	_, err := h.db.Exec(query, history.ID, history.UserID,
+		history.EventID, history.StartDate, history.EndDate,
+		history.XPEarned, history.CreatedAt, history.UpdatedAt)
+	if err != nil {
+		log.Printf("Error creating history record: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error creating history record"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, history)
+}
+
+// @Summary     Get History
+// @Description This API returns history details based on the provided history ID
+// @Tags         History
+// @Accept       json
+// @Produce      json
+// @Param        id   path string  true  "History ID"
+// @Success      200  {object} models.History
+// @Failure      400  {object} ErrorResponse
+// @Failure      404  {object} ErrorResponse
+// @Failure      500  {object} ErrorResponse
+// @Router       /history/{id} [get]
+func (h *HandlerV1) GetHistory(c *gin.Context) {
+	id := c.Param("id")
+	query := `SELECT id, user_id, event_id, start_date, end_date, xp_earned, created_at, updated_at 
+				FROM history WHERE id = $1`
+
+	var history models.History
+	err := h.db.Get(&history, query, id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "History record not found"})
+		} else {
+			log.Printf("Error fetching history record: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching history record"})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, history)
+}
+
+// @Summary     Update History
+// @Description This API updates an existing history record
+// @Tags         History
+// @Accept       json
+// @Produce      json
+// @Param        id   path string  true  "History ID"
+// @Param        body body models.History true "Updated History Data"
+// @Success      200  {object} models.History
+// @Failure      400  {object} ErrorResponse
+// @Failure      404  {object} ErrorResponse
+// @Failure      500  {object} ErrorResponse
+// @Router       /history/{id} [put]
+func (h *HandlerV1) UpdateHistory(c *gin.Context) {
+	id := c.Param("id")
+	var history models.History
+	if err := c.ShouldBindJSON(&history); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		return
+	}
+
+	query := `UPDATE history 
+				SET user_id = $1, event_id = $2, start_date = $3, 
+				end_date = $4, xp_earned = $5, updated_at = $6 
+				WHERE id = $7`
+	_, err := h.db.Exec(query, history.UserID, history.EventID, history.StartDate,
+		history.EndDate, history.XPEarned, history.UpdatedAt, id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "History record not found"})
+		} else {
+			log.Printf("Error updating history record: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error updating history record"})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, history)
+}
+
+// @Summary     Delete History
+// @Description This API deletes a history record based on the provided history ID
+// @Tags         History
+// @Accept       json
+// @Produce      json
+// @Param        id   path string  true  "History ID"
+// @Success      204  {object} nil
+// @Failure      400  {object} ErrorResponse
+// @Failure      404  {object} ErrorResponse
+// @Failure      500  {object} ErrorResponse
+// @Router       /history/{id} [delete]
+func (h *HandlerV1) DeleteHistory(c *gin.Context) {
+	id := c.Param("id")
+	query := `DELETE FROM history WHERE id = $1`
+
+	result, err := h.db.Exec(query, id)
+	if err != nil {
+		log.Printf("Error deleting history record: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error deleting history record"})
+		return
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		log.Printf("Error checking rows affected: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error checking rows affected"})
+		return
+	}
+
+	if rowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "History record not found"})
+		return
+	}
+
+	c.Status(http.StatusNoContent)
+}
+
+// @Summary     List History
+// @Description This API returns a list of all history records
+// @Tags         History
+// @Accept       json
+// @Produce      json
+// @Success      200  {array} models.History
+// @Failure      500  {object} ErrorResponse
+// @Router       /history [get]
+func (h *HandlerV1) ListHistory(c *gin.Context) {
+	query := `SELECT id, user_id, event_id, start_date, end_date, 
+				xp_earned, created_at, updated_at FROM history`
+
+	var history []models.History
+	err := h.db.Select(&history, query)
+	if err != nil {
+		log.Printf("Error fetching history records: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching history records"})
+		return
+	}
+
+	c.JSON(http.StatusOK, history)
+}
+
+// CreateMarket creates a new market record
+// @Summary     Create Market
+// @Description This API creates a new market record
+// @Tags         Market
+// @Accept       json
+// @Produce      json
+// @Param        market body models.Market true "Market"
+// @Success      201  {object} models.Market
+// @Failure      500  {object} ErrorResponse
+// @Router       /market [post]
+func (h *HandlerV1) CreateMarket(c *gin.Context) {
+	var market models.Market
+	if err := c.ShouldBindJSON(&market); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	market.CreatedAt = time.Now()
+	market.UpdatedAt = time.Now()
+
+	query := `INSERT INTO market (name, description, count, xp, category_name, created_at, updated_at) 
+              VALUES (:name, :description, :count, :xp, :category_name, :created_at, :updated_at) RETURNING id`
+	stmt, err := h.db.PrepareNamed(query)
+	if err != nil {
+		log.Printf("Error preparing query: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error preparing query"})
+		return
+	}
+
+	err = stmt.Get(&market.ID, market)
+	if err != nil {
+		log.Printf("Error inserting market record: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error inserting market record"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, market)
+}
+
+// GetMarket retrieves a market record by ID
+// @Summary     Get Market
+// @Description This API retrieves a market record by ID
+// @Tags         Market
+// @Accept       json
+// @Produce      json
+// @Param        id path int true "Market ID"
+// @Success      200  {object} models.Market
+// @Failure      404  {object} ErrorResponse
+// @Router       /market/{id} [get]
+func (h *HandlerV1) GetMarket(c *gin.Context) {
+	id := c.Param("id")
+	var market models.Market
+
+	query := `SELECT id, name, description, count, xp, category_name, created_at, updated_at FROM market WHERE id = $1`
+	err := h.db.Get(&market, query, id)
+	if err != nil {
+		log.Printf("Error fetching market record: %v", err)
+		c.JSON(http.StatusNotFound, gin.H{"error": "Market record not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, market)
+}
+
+// UpdateMarket updates an existing market record
+// @Summary     Update Market
+// @Description This API updates an existing market record
+// @Tags         Market
+// @Accept       json
+// @Produce      json
+// @Param        id path int true "Market ID"
+// @Param        market body models.Market true "Market"
+// @Success      200  {object} models.Market
+// @Failure      500  {object} ErrorResponse
+// @Router       /market/{id} [put]
+func (h *HandlerV1) UpdateMarket(c *gin.Context) {
+	id := c.Param("id")
+	var market models.Market
+	if err := c.ShouldBindJSON(&market); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	market.UpdatedAt = time.Now()
+
+	query := `UPDATE market SET name = :name, description = :description, count = :count, xp = :xp, 
+              category_name = :category_name, updated_at = :updated_at WHERE id = :id`
+	stmt, err := h.db.PrepareNamed(query)
+	if err != nil {
+		log.Printf("Error preparing query: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error preparing query"})
+		return
+	}
+	idInt, err := strconv.Atoi(id)
+	if err != nil {
+		log.Printf("Error preparing query: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error preparing query"})
+		return
+	}
+	market.ID = int64(idInt)
+	_, err = stmt.Exec(market)
+	if err != nil {
+		log.Printf("Error updating market record: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error updating market record"})
+		return
+	}
+
+	c.JSON(http.StatusOK, market)
+}
+
+// DeleteMarket deletes a market record by ID
+// @Summary     Delete Market
+// @Description This API deletes a market record by ID
+// @Tags         Market
+// @Accept       json
+// @Produce      json
+// @Param        id path int true "Market ID"
+// @Success      204  {object} nil
+// @Failure      500  {object} ErrorResponse
+// @Router       /market/{id} [delete]
+func (h *HandlerV1) DeleteMarket(c *gin.Context) {
+	id := c.Param("id")
+
+	query := `DELETE FROM market WHERE id = $1`
+	_, err := h.db.Exec(query, id)
+	if err != nil {
+		log.Printf("Error deleting market record: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error deleting market record"})
+		return
+	}
+
+	c.JSON(http.StatusNoContent, nil)
+}
+
+// ListMarkets lists all market records
+// @Summary     List Markets
+// @Description This API lists all market records
+// @Tags         Market
+// @Accept       json
+// @Produce      json
+// @Success      200  {array} models.Market
+// @Failure      500  {object} ErrorResponse
+// @Router       /market [get]
+func (h *HandlerV1) ListMarkets(c *gin.Context) {
+	var markets []models.Market
+
+	query := `SELECT id, name, description, count, xp, category_name, created_at, updated_at, image_url FROM market`
+	err := h.db.Select(&markets, query)
+	if err != nil {
+		log.Printf("Error fetching market records: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching market records"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"products": markets})
+}
+
+// CheckUserXP checks if the user's XP is enough to buy an item from the market
+// @Summary     Check User XP
+// @Description This API checks if the user's XP is enough to buy an item from the market
+// @Tags         Market
+// @Accept       json
+// @Produce      json
+// @Param        userId path int true "User ID"
+// @Param        itemId path int true "Item ID"
+// @Success      200  {object} models.Message
+// @Failure      400  {object} ErrorResponse
+// @Failure      404  {object} ErrorResponse
+// @Failure      500  {object} ErrorResponse
+// @Router       /market/check/{userId}/{itemId} [get]
+func (h *HandlerV1) CheckUserXP(c *gin.Context) {
+	userId := c.Param("userId")
+	itemId := c.Param("itemId")
+
+	var user models.User
+	userQuery := "SELECT xp FROM users WHERE id = $1"
+	err := h.db.Get(&user, userQuery, userId)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching user data"})
+		}
+		return
+	}
+	var item models.Market
+	itemQuery := "SELECT xp FROM market WHERE id = $1"
+	err = h.db.Get(&item, itemQuery, itemId)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Item not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching item data"})
+		}
+		return
+	}
+
+	if user.XP >= int(item.XP) {
+		c.JSON(http.StatusOK, gin.H{"can_buy": true})
+	} else {
+		c.JSON(http.StatusOK, gin.H{"can_buy": false})
+	}
+}
+
+// OrderItem handles the order process for a user
+// @Summary     Order Item
+// @Description This API allows a user to order an item from the market if they have enough XP
+// @Tags         Market
+// @Accept       json
+// @Produce      json
+// @Param        userId path int true "User ID"
+// @Param        itemId path int true "Item ID"
+// @Success      200  {object} models.Message
+// @Failure      400  {object} ErrorResponse
+// @Failure      404  {object} ErrorResponse
+// @Failure      500  {object} ErrorResponse
+// @Router       /market/order/{userId}/{itemId} [post]
+func (h *HandlerV1) OrderItem(c *gin.Context) {
+	userId := c.Param("userId")
+	itemId := c.Param("itemId")
+
+	var user models.User
+	userQuery := "SELECT id, xp FROM users WHERE id = $1"
+	err := h.db.Get(&user, userQuery, userId)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching user data"})
+		}
+		return
+	}
+	var item models.Market
+	itemQuery := "SELECT id, xp FROM market WHERE id = $1"
+	err = h.db.Get(&item, itemQuery, itemId)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Item not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching item data"})
+		}
+		return
+	}
+
+	if user.XP < int(item.XP) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Not enough XP"})
+		return
+	}
+
+	newXP := user.XP - int(item.XP)
+	updateUserQuery := "UPDATE users SET xp = $1 WHERE id = $2"
+	_, err = h.db.Exec(updateUserQuery, newXP, userId)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error updating user XP"})
+		return
+	}
+	orderNumber := rand.Intn(90000) + 10000 // Generates a number between 10000 and 99999
+
+	order := models.Order{
+		UserID:      user.ID,
+		ItemID:      int(item.ID),
+		OrderNumber: orderNumber,
+		CreatedAt:   time.Now(),
+	}
+	orderQuery := `INSERT INTO orders (user_id, item_id, order_number, created_at) VALUES ($1, $2, $3, $4)`
+	_, err = h.db.Exec(orderQuery, order.UserID, order.ItemID, order.OrderNumber, order.CreatedAt)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error creating order"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Order placed successfully", "order_number": orderNumber})
+}
+
+
+#### ./docker-compose.yaml ####
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - GIN_MODE=release
+    volumes:
+      - .:/app
+    command: ["./main"]
+
+
+#### ./.git/index ####
+DIRC      f•
+Æ	bA[f•rû        ò≠  Å§  Ë  Ë  +î618,jÛ#ôèT√èdÛ´ô 
+Dockerfile        f•é è+f•é è+    ò≤  Å§  Ë  Ë  Aú–'û´T"H$èúÜ5ë◊lW  Makefile  f¶<iHf¶<iH     W:  Å§  Ë  Ë ü√ˇ∑Ω*0äÌ8æÒ¸¥ ñ∆ı&Ö a.zip     f¶q]Æhöf¶q]Æhö    òõ  Å§  Ë  Ë  π‚ÿë:àgó—º⁄¬ìFt™™Ë config/config.go  f•
+ÆgPŸf•rû        ò¨  Å§  Ë  Ë   «-1≤mMùN˙/FzR
+Û‡ß docker-compose.yaml       f¶ln
+™»–f¶ln
+™»–    òû  Å§  Ë  Ë  ∞Aˆi¡`Ãó˙ïåJ°‡øKÌ!%ª docs/docs.go      f•
+∞]1“f•
+∞]1“    ß  Å§  Ë  Ë    Êù‚õ≤—÷CKã)ÆwZÿ¬‰åSë docs/docs.go:Zone.Identifier      f¶ln
+™»–f¶ln
+™»–    òù  Å§  Ë  Ë  ≠;ë—∑nhÏü‹_J:d“õ ¬>î docs/swagger.json f•
+∞X"Jf•
+∞X"J    ß&  Å§  Ë  Ë    Êù‚õ≤—÷CKã)ÆwZÿ¬‰åSë !docs/swagger.json:Zone.Identifier f¶lnC_Kf¶lnC_K    òü  Å§  Ë  Ë  S‰uŸ=”	≥ó¨n•wı≠ƒâÜıÁ] docs/swagger.yaml f•
+∞∫|Df•
+∞∫|D    ß'  Å§  Ë  Ë    Êù‚õ≤—÷CKã)ÆwZÿ¬‰åSë !docs/swagger.yaml:Zone.Identifier f•†%e»]f•†%e»]    òØ  Å§  Ë  Ë  ÅÂ∫˘èãÕÂÛ£áQ5ùë]\ go.mod    f•†%e»]f•†%e»]    ò∞  Å§  Ë  Ë ì|DSÍ˜ß˚Ò«`ü±0è*™dÈ\j go.sum    f¶qs¢˝f¶qs¢˝    ò°  Å§  Ë  Ë  î.J”>±
+XHUÈ4¥«b\zÑ handlers/starthandler.go  f¶2ñ{Œ~f¶2ñ{Œ~    ò±  Å§  Ë  Ë  0DÍWË˝ò\cRﬂìıes:lö⁄ main.go   f•
+∞HÛ±f•fË        ò£  Å§  Ë  Ë   YV1‘† ]ôÂÚI8èê•ÊIh
+ $migrations/000001_tables_up.down.sql      f•KYƒf•KYƒ    ò•  Å§  Ë  Ë  ©y!i?LØâ†|xßE√ª)ã„b "migrations/000001_tables_up.up.sql        f¶'Í¿ñÍf¶'Í¿ñÍ    ò®  Å§  Ë  Ë  ÿ§,UUöh~'ò1úŒà£2SΩKC models/event.go   f•
+Æ qo⁄f•àÊ        ò©  Å§  Ë  Ë  ∏y@bSUÿ≥#|˘ŸS(cø˘^ models/history.go f¶<È8èf¶<È8è    òß  Å§  Ë  Ë  ÛÑ#‹ÒÕåÙêÑ/ª'[_oä*,W models/user.go    f¶Ä’-∫a±f¶Ä’-∫a±    ò´  Å§  Ë  Ë  ÅóÛK!ònöZÚgˇ˚ÜBlŒñ#ﬂ webhandlers/handlers.go   TREE   › 21 6
+3˛2a90ì°î¸Ël¯Ö‘Ï∆ydocs 6 0
+ªÓ,«˙ßøpÖg˘‘ÖôÔGconfig 1 0
+ˆ›©B“§â√î
+qó"∏ómodels 3 0
+ÏNRa⁄2`⁄¶€>¶Ùo%«handlers 1 0
+KèK’÷áèñΩO¸ä;g(+C¨migrations 2 0
+Å+h°Æ˙l-$}πòpôEïY
+webhandlers 1 0
+™Mñ∫~∆lÍ≥^åi~Á5'yqò™D}ßÖÕ‡G°‡Ú!ﬂl÷Õ
+
+#### ./.git/HEAD ####
+ref: refs/heads/main
+
+
+#### ./.git/config ####
+[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = false
+	logallrefupdates = true
+[remote "origin"]
+	url = https://github.com/rarebek/ecochallenge.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
+
+
+#### ./.git/description ####
+Unnamed repository; edit this file 'description' to name the repository.
+
+
+#### ./.git/FETCH_HEAD ####
+2330a17315fe364d7384a0451e9311a46721fbf4	not-for-merge	branch 'main' of https://github.com/rarebek/ecochallenge
+
+
+#### ./.git/COMMIT_EDITMSG ####
+all errors fixed
+
+
+#### ./.git/info/exclude ####
+# git ls-files --others --exclude-from=.git/info/exclude
+# Lines that start with '#' are comments.
+# For a project mostly in C, the following would be a good set of
+# exclude patterns (uncomment them if you want to use them):
+# *.[oa]
+# *~
+
+
+#### ./.git/refs/remotes/origin/main ####
+431905a0e63d238e4109080d0405f96cca50b7cb
+
+
+#### ./.git/refs/heads/master ####
+a2dcd8f0f6d1443cebe435a0fa942445085b8126
+
+
+#### ./.git/refs/heads/main ####
+431905a0e63d238e4109080d0405f96cca50b7cb
+
+
+#### ./.git/logs/HEAD ####
+0000000000000000000000000000000000000000 63dd626e6ce74e41874428498654fb5f10ed72ff Mubina <mubinayigitaliyeva00@gmail.com> 1722077644 +0500	commit (initial): push history overwriting because git not working on my friends machine
+63dd626e6ce74e41874428498654fb5f10ed72ff a2dcd8f0f6d1443cebe435a0fa942445085b8126 Mubina <mubinayigitaliyeva00@gmail.com> 1722091973 +0500	commit: a
+a2dcd8f0f6d1443cebe435a0fa942445085b8126 a2dcd8f0f6d1443cebe435a0fa942445085b8126 Mubina <mubinayigitaliyeva00@gmail.com> 1722091999 +0500	checkout: moving from master to main
+a2dcd8f0f6d1443cebe435a0fa942445085b8126 431905a0e63d238e4109080d0405f96cca50b7cb nodirbek <nomonovn2@gmail.com> 1722186694 -0700	commit: all errors fixed
+
+
+#### ./.git/logs/refs/remotes/origin/main ####
+0000000000000000000000000000000000000000 2330a17315fe364d7384a0451e9311a46721fbf4 Mubina <mubinayigitaliyeva00@gmail.com> 1722077735 +0500	fetch: storing head
+2330a17315fe364d7384a0451e9311a46721fbf4 431905a0e63d238e4109080d0405f96cca50b7cb nodirbek <nomonovn2@gmail.com> 1722186705 -0700	update by push
+
+
+#### ./.git/logs/refs/heads/master ####
+0000000000000000000000000000000000000000 63dd626e6ce74e41874428498654fb5f10ed72ff Mubina <mubinayigitaliyeva00@gmail.com> 1722077644 +0500	commit (initial): push history overwriting because git not working on my friends machine
+63dd626e6ce74e41874428498654fb5f10ed72ff a2dcd8f0f6d1443cebe435a0fa942445085b8126 Mubina <mubinayigitaliyeva00@gmail.com> 1722091973 +0500	commit: a
+
+
+#### ./.git/logs/refs/heads/main ####
+0000000000000000000000000000000000000000 a2dcd8f0f6d1443cebe435a0fa942445085b8126 Mubina <mubinayigitaliyeva00@gmail.com> 1722091985 +0500	branch: Created from master
+a2dcd8f0f6d1443cebe435a0fa942445085b8126 431905a0e63d238e4109080d0405f96cca50b7cb nodirbek <nomonovn2@gmail.com> 1722186694 -0700	commit: all errors fixed
+
+
+#### ./docs/docs.go ####
+// Package docs Code generated by swaggo/swag. DO NOT EDIT
+package docs
+
+import "github.com/swaggo/swag"
+
+const docTemplate = `{
+    "schemes": {{ marshal .Schemes }},
+    "swagger": "2.0",
+    "info": {
+        "description": "{{escape .Description}}",
+        "title": "{{.Title}}",
+        "contact": {},
+        "version": "{{.Version}}"
+    },
+    "host": "{{.Host}}",
+    "basePath": "{{.BasePath}}",
+    "paths": {
+        "/event": {
+            "post": {
+                "description": "This API creates a new event",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Event"
+                ],
+                "summary": "Create Event",
+                "parameters": [
+                    {
+                        "description": "Event Data",
+                        "name": "event",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.Event"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/models.Event"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/event/{id}": {
+            "get": {
+                "description": "This API returns event details based on the provided event ID",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Event"
+                ],
+                "summary": "Get Event",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Event ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.Event"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "description": "This API updates event details",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Event"
+                ],
+                "summary": "Update Event",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Event ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Updated Event Data",
+                        "name": "event",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.Event"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.Event"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "This API deletes an event based on the provided event ID",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Event"
+                ],
+                "summary": "Delete Event",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Event ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/events": {
+            "get": {
+                "description": "This API returns a list of all events",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Event"
+                ],
+                "summary": "List Events",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/models.Event"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/history": {
+            "get": {
+                "description": "This API returns a list of all history records",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "History"
+                ],
+                "summary": "List History",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/models.History"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "This API creates a new history record",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "History"
+                ],
+                "summary": "Create History",
+                "parameters": [
+                    {
+                        "description": "History Data",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.History"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/models.History"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/history/{id}": {
+            "get": {
+                "description": "This API returns history details based on the provided history ID",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "History"
+                ],
+                "summary": "Get History",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "History ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.History"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "description": "This API updates an existing history record",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "History"
+                ],
+                "summary": "Update History",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "History ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Updated History Data",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.History"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.History"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "This API deletes a history record based on the provided history ID",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "History"
+                ],
+                "summary": "Delete History",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "History ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/market": {
+            "get": {
+                "description": "This API lists all market records",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Market"
+                ],
+                "summary": "List Markets",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/models.Market"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "This API creates a new market record",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Market"
+                ],
+                "summary": "Create Market",
+                "parameters": [
+                    {
+                        "description": "Market",
+                        "name": "market",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.Market"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/models.Market"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/market/check/{userId}/{itemId}": {
+            "get": {
+                "description": "This API checks if the user's XP is enough to buy an item from the market",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Market"
+                ],
+                "summary": "Check User XP",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "User ID",
+                        "name": "userId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Item ID",
+                        "name": "itemId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.Message"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/market/order/{userId}/{itemId}": {
+            "post": {
+                "description": "This API allows a user to order an item from the market if they have enough XP",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Market"
+                ],
+                "summary": "Order Item",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "User ID",
+                        "name": "userId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Item ID",
+                        "name": "itemId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.Message"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/market/{id}": {
+            "get": {
+                "description": "This API retrieves a market record by ID",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Market"
+                ],
+                "summary": "Get Market",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Market ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.Market"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "description": "This API updates an existing market record",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Market"
+                ],
+                "summary": "Update Market",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Market ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Market",
+                        "name": "market",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.Market"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.Market"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "This API deletes a market record by ID",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Market"
+                ],
+                "summary": "Delete Market",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Market ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/questions/{difficulty}": {
+            "get": {
+                "description": "This API generates 10 questions with Gemini AI providing their answers too.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Question"
+                ],
+                "summary": "Get Questions",
+                "parameters": [
+                    {
+                        "enum": [
+                            "easy",
+                            "medium",
+                            "hard"
+                        ],
+                        "type": "string",
+                        "description": "Difficulty Level",
+                        "name": "difficulty",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/ranking": {
+            "get": {
+                "description": "This API returns the ranking of users based on XP",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Ranking"
+                ],
+                "summary": "Get Rankings",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/models.RankingResponse"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/user": {
+            "post": {
+                "description": "This API creates a new user",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "User"
+                ],
+                "summary": "Create User",
+                "parameters": [
+                    {
+                        "description": "User Data",
+                        "name": "user",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.User"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/models.User"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/user/{id}": {
+            "get": {
+                "description": "This API returns user details based on the provided user ID",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "User"
+                ],
+                "summary": "Get User",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "User ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.User"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "description": "This API updates user details",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "User"
+                ],
+                "summary": "Update User",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "User ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Updated User Data",
+                        "name": "user",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.User"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.User"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "This API deletes a user based on the provided user ID",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "User"
+                ],
+                "summary": "Delete User",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "User ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/users": {
+            "get": {
+                "description": "This API returns a list of all users",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "User"
+                ],
+                "summary": "List Users",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/models.User"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/xp": {
+            "post": {
+                "description": "Adds XP by given data",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "User"
+                ],
+                "summary": "EarnXP",
+                "parameters": [
+                    {
+                        "description": "XP Data",
+                        "name": "user",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.EarnXP"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/models.Message"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webhandlers.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "models.EarnXP": {
+            "type": "object",
+            "properties": {
+                "correct_count": {
+                    "type": "integer"
+                },
+                "difficulty": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                }
+            }
+        },
+        "models.Event": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "description": {
+                    "type": "string"
+                },
+                "end_date": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "image": {
+                    "type": "string"
+                },
+                "location": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "resp_officer": {
+                    "type": "string"
+                },
+                "resp_officer_image": {
+                    "type": "string"
+                },
+                "start_date": {
+                    "type": "string"
+                },
+                "total_xp": {
+                    "type": "integer"
+                },
+                "updated_at": {
+                    "type": "string"
+                }
+            }
+        },
+        "models.History": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "end_date": {
+                    "type": "string"
+                },
+                "event_id": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "start_date": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
+                },
+                "user_id": {
+                    "type": "integer"
+                },
+                "xp_earned": {
+                    "type": "integer"
+                }
+            }
+        },
+        "models.Market": {
+            "type": "object",
+            "properties": {
+                "category_name": {
+                    "type": "string"
+                },
+                "count": {
+                    "type": "integer"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "description": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "image_url": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
+                },
+                "xp": {
+                    "type": "integer"
+                }
+            }
+        },
+        "models.Message": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string"
+                }
+            }
+        },
+        "models.RankingResponse": {
+            "type": "object",
+            "properties": {
+                "avatar": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "location": {
+                    "type": "string"
+                },
+                "rank": {
+                    "type": "integer"
+                },
+                "user_name": {
+                    "type": "string"
+                },
+                "xp": {
+                    "type": "integer"
+                }
+            }
+        },
+        "models.User": {
+            "type": "object"
+        },
+        "webhandlers.ErrorResponse": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "type": "string"
+                }
+            }
+        }
+    }
+}`
+
+// SwaggerInfo holds exported Swagger Info so clients can modify it
+var SwaggerInfo = &swag.Spec{
+	Version:          "",
+	Host:             "",
+	BasePath:         "",
+	Schemes:          []string{},
+	Title:            "",
+	Description:      "",
+	InfoInstanceName: "swagger",
+	SwaggerTemplate:  docTemplate,
+	LeftDelim:        "{{",
+	RightDelim:       "}}",
+}
+
+func init() {
+	swag.Register(SwaggerInfo.InstanceName(), SwaggerInfo)
+}
+
+
+#### ./docs/swagger.yaml ####
+definitions:
+  models.EarnXP:
+    properties:
+      correct_count:
+        type: integer
+      difficulty:
+        type: string
+      id:
+        type: string
+    type: object
+  models.Event:
+    properties:
+      created_at:
+        type: string
+      description:
+        type: string
+      end_date:
+        type: string
+      id:
+        type: string
+      image:
+        type: string
+      location:
+        type: string
+      name:
+        type: string
+      resp_officer:
+        type: string
+      resp_officer_image:
+        type: string
+      start_date:
+        type: string
+      total_xp:
+        type: integer
+      updated_at:
+        type: string
+    type: object
+  models.History:
+    properties:
+      created_at:
+        type: string
+      end_date:
+        type: string
+      event_id:
+        type: string
+      id:
+        type: string
+      start_date:
+        type: string
+      updated_at:
+        type: string
+      user_id:
+        type: integer
+      xp_earned:
+        type: integer
+    type: object
+  models.Market:
+    properties:
+      category_name:
+        type: string
+      count:
+        type: integer
+      created_at:
+        type: string
+      description:
+        type: string
+      id:
+        type: integer
+      image_url:
+        type: string
+      name:
+        type: string
+      updated_at:
+        type: string
+      xp:
+        type: integer
+    type: object
+  models.Message:
+    properties:
+      message:
+        type: string
+    type: object
+  models.RankingResponse:
+    properties:
+      avatar:
+        type: string
+      id:
+        type: integer
+      location:
+        type: string
+      rank:
+        type: integer
+      user_name:
+        type: string
+      xp:
+        type: integer
+    type: object
+  models.User:
+    type: object
+  webhandlers.ErrorResponse:
+    properties:
+      error:
+        type: string
+    type: object
+info:
+  contact: {}
+paths:
+  /event:
+    post:
+      consumes:
+      - application/json
+      description: This API creates a new event
+      parameters:
+      - description: Event Data
+        in: body
+        name: event
+        required: true
+        schema:
+          $ref: '#/definitions/models.Event'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.Event'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Create Event
+      tags:
+      - Event
+  /event/{id}:
+    delete:
+      consumes:
+      - application/json
+      description: This API deletes an event based on the provided event ID
+      parameters:
+      - description: Event ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Delete Event
+      tags:
+      - Event
+    get:
+      consumes:
+      - application/json
+      description: This API returns event details based on the provided event ID
+      parameters:
+      - description: Event ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Event'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Get Event
+      tags:
+      - Event
+    put:
+      consumes:
+      - application/json
+      description: This API updates event details
+      parameters:
+      - description: Event ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Updated Event Data
+        in: body
+        name: event
+        required: true
+        schema:
+          $ref: '#/definitions/models.Event'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Event'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Update Event
+      tags:
+      - Event
+  /events:
+    get:
+      consumes:
+      - application/json
+      description: This API returns a list of all events
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.Event'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: List Events
+      tags:
+      - Event
+  /history:
+    get:
+      consumes:
+      - application/json
+      description: This API returns a list of all history records
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.History'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: List History
+      tags:
+      - History
+    post:
+      consumes:
+      - application/json
+      description: This API creates a new history record
+      parameters:
+      - description: History Data
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/models.History'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.History'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Create History
+      tags:
+      - History
+  /history/{id}:
+    delete:
+      consumes:
+      - application/json
+      description: This API deletes a history record based on the provided history
+        ID
+      parameters:
+      - description: History ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Delete History
+      tags:
+      - History
+    get:
+      consumes:
+      - application/json
+      description: This API returns history details based on the provided history
+        ID
+      parameters:
+      - description: History ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.History'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Get History
+      tags:
+      - History
+    put:
+      consumes:
+      - application/json
+      description: This API updates an existing history record
+      parameters:
+      - description: History ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Updated History Data
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/models.History'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.History'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Update History
+      tags:
+      - History
+  /market:
+    get:
+      consumes:
+      - application/json
+      description: This API lists all market records
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.Market'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: List Markets
+      tags:
+      - Market
+    post:
+      consumes:
+      - application/json
+      description: This API creates a new market record
+      parameters:
+      - description: Market
+        in: body
+        name: market
+        required: true
+        schema:
+          $ref: '#/definitions/models.Market'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.Market'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Create Market
+      tags:
+      - Market
+  /market/{id}:
+    delete:
+      consumes:
+      - application/json
+      description: This API deletes a market record by ID
+      parameters:
+      - description: Market ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Delete Market
+      tags:
+      - Market
+    get:
+      consumes:
+      - application/json
+      description: This API retrieves a market record by ID
+      parameters:
+      - description: Market ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Market'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Get Market
+      tags:
+      - Market
+    put:
+      consumes:
+      - application/json
+      description: This API updates an existing market record
+      parameters:
+      - description: Market ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Market
+        in: body
+        name: market
+        required: true
+        schema:
+          $ref: '#/definitions/models.Market'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Market'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Update Market
+      tags:
+      - Market
+  /market/check/{userId}/{itemId}:
+    get:
+      consumes:
+      - application/json
+      description: This API checks if the user's XP is enough to buy an item from
+        the market
+      parameters:
+      - description: User ID
+        in: path
+        name: userId
+        required: true
+        type: integer
+      - description: Item ID
+        in: path
+        name: itemId
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Message'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Check User XP
+      tags:
+      - Market
+  /market/order/{userId}/{itemId}:
+    post:
+      consumes:
+      - application/json
+      description: This API allows a user to order an item from the market if they
+        have enough XP
+      parameters:
+      - description: User ID
+        in: path
+        name: userId
+        required: true
+        type: integer
+      - description: Item ID
+        in: path
+        name: itemId
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Message'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Order Item
+      tags:
+      - Market
+  /questions/{difficulty}:
+    get:
+      consumes:
+      - application/json
+      description: This API generates 10 questions with Gemini AI providing their
+        answers too.
+      parameters:
+      - description: Difficulty Level
+        enum:
+        - easy
+        - medium
+        - hard
+        in: path
+        name: difficulty
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Get Questions
+      tags:
+      - Question
+  /ranking:
+    get:
+      consumes:
+      - application/json
+      description: This API returns the ranking of users based on XP
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.RankingResponse'
+            type: array
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Get Rankings
+      tags:
+      - Ranking
+  /user:
+    post:
+      consumes:
+      - application/json
+      description: This API creates a new user
+      parameters:
+      - description: User Data
+        in: body
+        name: user
+        required: true
+        schema:
+          $ref: '#/definitions/models.User'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.User'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Create User
+      tags:
+      - User
+  /user/{id}:
+    delete:
+      consumes:
+      - application/json
+      description: This API deletes a user based on the provided user ID
+      parameters:
+      - description: User ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Delete User
+      tags:
+      - User
+    get:
+      consumes:
+      - application/json
+      description: This API returns user details based on the provided user ID
+      parameters:
+      - description: User ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.User'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Get User
+      tags:
+      - User
+    put:
+      consumes:
+      - application/json
+      description: This API updates user details
+      parameters:
+      - description: User ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Updated User Data
+        in: body
+        name: user
+        required: true
+        schema:
+          $ref: '#/definitions/models.User'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.User'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: Update User
+      tags:
+      - User
+  /users:
+    get:
+      consumes:
+      - application/json
+      description: This API returns a list of all users
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.User'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: List Users
+      tags:
+      - User
+  /xp:
+    post:
+      consumes:
+      - application/json
+      description: Adds XP by given data
+      parameters:
+      - description: XP Data
+        in: body
+        name: user
+        required: true
+        schema:
+          $ref: '#/definitions/models.EarnXP'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.Message'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webhandlers.ErrorResponse'
+      summary: EarnXP
+      tags:
+      - User
+swagger: "2.0"
+
+
+#### ./config/config.go ####
+package config
+
+import (
+	"os"
+)
+
+// Config ...
+type Config struct {
+	Environment string
+
+	CtxTimeout string
+	GinMode    string
+	HttpPort   string
+
+	PostgresHost     string
+	PostgresPort     string
+	PostgresUser     string
+	PostgresDatabase string
+	PostgresPassword string
+
+	RedisHost     string
+	RedisPort     string
+	RedisDatabase string
+	RedisPassword string
+
+	SigningKey          string
+	AccessTokenTimeout  string
+	RefreshTokenTimeout string
+
+	AuthConfigPath string
+	CSVFilePath    string
+
+	SMTPEmail     string
+	SMTPEmailPass string
+	SMTPHost      string
+	SMTPPort      string
+}
+
+func Load() Config {
+	c := Config{}
+
+	c.Environment = getEnv("ENVIRONMENT", "production")
+
+	c.GinMode = getEnv("GIN_MODE", "release")
+	c.HttpPort = getEnv("HTTP_PORT", ":8080")
+	c.CtxTimeout = getEnv("CTX_TIMEOUT", "5s")
+
+	c.PostgresHost = getEnv("POSTGRES_HOST", "localhost")
+	c.PostgresPort = getEnv("POSTGRES_PORT", "5432")
+	c.PostgresDatabase = getEnv("POSTGRES_DATABASE", "ecodb")
+	c.PostgresUser = getEnv("POSTGRES_USER", "postgres")
+	c.PostgresPassword = getEnv("POSTGRES_PASSWORD", "nodirbek")
+
+	c.RedisHost = getEnv("REDIS_HOST", "localhost")
+	c.RedisPort = getEnv("REDIS_PORT", ":6379")
+	c.RedisDatabase = getEnv("REDIS_DATABASE", "0")
+	c.RedisPassword = getEnv("REDIS_PASSWORD", "")
+
+	c.SigningKey = getEnv("SIGNING_KEY", "template")
+	c.AccessTokenTimeout = getEnv("ACCESS_TOKEN_TIMEOUT", "10800")   // 3h
+	c.RefreshTokenTimeout = getEnv("REFRESH_TOKEN_TIMEOUT", "86400") // 24h
+
+	c.CSVFilePath = getEnv("CSV_FILE_PATH", "./config/policy.csv")
+	c.AuthConfigPath = getEnv("AUTH_PATH", "./config/model.conf")
+
+	c.SMTPHost = getEnv("SMTP_HOST", "smtp.gmail.com")
+	c.SMTPPort = getEnv("SMTP_PORT", "587")
+	c.SMTPEmail = getEnv("SMTP_EMAIL", "your_email")
+	c.SMTPEmailPass = getEnv("SMTP_EMAIL_PASSWORD", "your_email_app_key")
+
+	return c
+}
+
+func getEnv(key string, defaultVaule string) string {
+	value, exists := os.LookupEnv(key)
+	if exists {
+		return value
+	}
+	return defaultVaule
+}
+
+
+#### ./merged_content.txt ####
+
+
+#### ./handlers/starthandler.go ####
+package handlers
+
+import (
+	"database/sql"
+	"fmt"
+	"log"
+	"strconv"
+	"sync"
+
+	"github.com/k0kubun/pp"
+	_ "github.com/lib/pq"
+	"gopkg.in/telebot.v3"
+)
+
+type User struct {
+	Id          string
+	PhoneNumber string
+	FullName    string
+	Location    string
+	FirstName   string
+	LastName    string
+	Xp          int
+	BirthDate   sql.NullString // Use sql.NullString for nullable fields
+	Avatar      string
+}
+
+var (
+	userMap = make(map[int]*User)
+	mu      sync.Mutex
+	db      *sql.DB
+)
+
+func init() {
+	var err error
+	connStr := "postgres://postgres:nodirbek@localhost:5432/ecodb?sslmode=disable"
+	db, err = sql.Open("postgres", connStr)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func HandleStart(c telebot.Context, b *telebot.Bot) {
+	userID := c.Message().Sender.ID
+
+	exists, err := userExists(int(userID))
+	if err != nil {
+		log.Println("Error checking user existence:", err)
+		b.Send(c.Message().Sender, "Xatolik yuz berdi. Iltimos, qayta urinib ko'ring.")
+		return
+	}
+
+	if exists {
+		sendWebAppButton(c, b, int(userID))
+		return
+	}
+
+	b.Send(c.Message().Sender, "Ismingizni kiriting:")
+
+	b.Handle(telebot.OnText, func(c telebot.Context) error {
+		if c.Message().Sender.ID != userID {
+			return nil
+		}
+
+		firstName := c.Text()
+
+		b.Send(c.Message().Sender, "Familiyangizni kiriting:")
+
+		b.Handle(telebot.OnText, func(c telebot.Context) error {
+			if c.Message().Sender.ID != userID {
+				return nil
+			}
+			lastName := c.Text()
+
+			markup := telebot.ReplyMarkup{ResizeKeyboard: true, OneTimeKeyboard: true}
+			btnSharePhone := markup.Contact("Telefon raqamni yuborish")
+			markup.Reply(markup.Row(btnSharePhone))
+
+			b.Send(c.Message().Sender, "Telefon raqamingizni yuboring:", &markup)
+
+			b.Handle(telebot.OnContact, func(c telebot.Context) error {
+				if c.Message().Sender.ID != userID {
+					return nil
+				}
+				phoneNumber := c.Message().Contact.PhoneNumber
+
+				btnShareLocation := markup.Location("Joylashuvni yuborish")
+				markup.Reply(markup.Row(btnShareLocation))
+
+				b.Send(c.Message().Sender, "Joylashuvingizni yuboring:", &markup)
+
+				b.Handle(telebot.OnLocation, func(c telebot.Context) error {
+					if c.Message().Sender.ID != userID {
+						return nil
+					}
+					location := c.Message().Location
+					locationStr := fmt.Sprintf("Lat: %f, Lon: %f", location.Lat, location.Lng)
+
+					user := &User{
+						Id:          strconv.Itoa(int(userID)),
+						PhoneNumber: phoneNumber,
+						FullName:    firstName + " " + lastName,
+						Location:    locationStr,
+						FirstName:   firstName,
+						LastName:    lastName,
+						Xp:          5,
+						BirthDate:   sql.NullString{},
+						Avatar:      "https://media.rarebek.uz/avatars/3aa0c0e3-30bb-4ae8-bb79-d360572f2197.png",
+					}
+
+					err := insertUser(user)
+					if err != nil {
+						log.Println("Error inserting user:", err)
+						b.Send(c.Message().Sender, "Xatolik yuz berdi. Iltimos, qayta urinib ko'ring.")
+						return nil
+					}
+
+					sendWebAppButton(c, b, int(userID))
+					return nil
+				})
+				return nil
+			})
+			return nil
+		})
+		return nil
+	})
+}
+
+func userExists(userID int) (bool, error) {
+	var exists bool
+	query := `SELECT exists (SELECT 1 FROM users WHERE id=$1)`
+	err := db.QueryRow(query, userID).Scan(&exists)
+	return exists, err
+}
+
+func sendWebAppButton(c telebot.Context, b *telebot.Bot, userID int) {
+	btnWebApp := telebot.InlineButton{
+		Text: "Open Web App",
+		WebApp: &telebot.WebApp{
+			URL: "https://a3d4-185-213-229-5.ngrok-free.app",
+		},
+	}
+
+	inlineMarkup := telebot.ReplyMarkup{
+		InlineKeyboard: [][]telebot.InlineButton{
+			{btnWebApp},
+		},
+	}
+
+	b.Send(c.Message().Sender, "Assalomu alaykum! Botga xush kelibsiz.", &inlineMarkup)
+}
+
+func insertUser(user *User) error {
+	query := `
+		INSERT INTO users (id, first_name, last_name, phone_number, location, xp, birth_date, avatar)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	`
+	pp.Println(user)
+	_, err := db.Exec(query, user.Id, user.FirstName, user.LastName, user.PhoneNumber, user.Location, user.Xp, user.BirthDate, user.Avatar)
+	return err
+}
+
+
+#### ./models/event.go ####
+package models
+
+type Event struct {
+	ID               string `db:"id" json:"id"`
+	Name             string `db:"name" json:"name"`
+	Image            string `db:"image" json:"image"`
+	Description      string `db:"description" json:"description"`
+	TotalXP          int    `db:"total_xp" json:"total_xp"`
+	StartDate        string `db:"start_date" json:"start_date"`
+	EndDate          string `db:"end_date" json:"end_date"`
+	RespOfficer      string `db:"resp_officer" json:"resp_officer"`
+	RespOfficerImage string `db:"resp_officer_image" json:"resp_officer_image"`
+	CreatedAt        string `db:"created_at" json:"created_at"`
+	UpdatedAt        string `db:"updated_at" json:"updated_at"`
+	Location         string `json:"location"`
+}
+
+
+#### ./models/user.go ####
+package models
+
+import (
+	"database/sql"
+	"time"
+)
+
+type User struct {
+	ID          int            `db:"id" json:"id"`
+	FirstName   string         `db:"first_name" json:"first_name"`
+	LastName    string         `db:"last_name" json:"last_name"`
+	Avatar      string         `db:"avatar" json:"avatar"`
+	BirthDate   sql.NullString `db:"birth_date" json:"birth_date"`
+	Location    string         `db:"location" json:"location"`
+	PhoneNumber string         `db:"phone_number" json:"phone_number"`
+	XP          int            `db:"xp" json:"xp"`
+}
+
+type RankingResponse struct {
+	ID       int    `json:"id"`
+	Rank     int    `json:"rank"`
+	UserName string `json:"user_name"`
+	XP       int    `json:"xp"`
+	Avatar   string `json:"avatar"`
+	Location string `json:"location"`
+}
+
+type Market struct {
+	ID           int64     `json:"id" db:"id"`
+	Name         string    `json:"name" db:"name"`
+	Description  string    `json:"description" db:"description"`
+	Count        int64     `json:"count" db:"count"`
+	XP           int64     `json:"xp" db:"xp"`
+	CategoryName string    `json:"category_name" db:"category_name"`
+	CreatedAt    time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at" db:"updated_at"`
+	ImageUrl     string    `json:"image_url" db:"image_url"`
+}
+
+type Order struct {
+	ID          int       `db:"id" json:"id"`
+	UserID      int       `db:"user_id" json:"user_id"`
+	ItemID      int       `db:"item_id" json:"item_id"`
+	OrderNumber int       `db:"order_number" json:"order_number"`
+	CreatedAt   time.Time `db:"created_at" json:"created_at"`
+}
+
+type Message struct {
+	Message string `json:"message"`
+}
+
+type EarnXP struct {
+	Id           string `json:"id"`
+	Difficulty   string `json:"difficulty"`
+	CorrectCount int    `json:"correct_count"`
+}
+
+
+#### ./models/history.go ####
+package models
+
+type History struct {
+	ID        string `db:"id" json:"id"`
+	UserID    int    `db:"user_id" json:"user_id"`
+	EventID   string `db:"event_id" json:"event_id"`
+	StartDate string `db:"start_date" json:"start_date"`
+	EndDate   string `db:"end_date" json:"end_date"`
+	XPEarned  int    `db:"xp_earned" json:"xp_earned"`
+	CreatedAt string `db:"created_at" json:"created_at"`
+	UpdatedAt string `db:"updated_at" json:"updated_at"`
+}
+
+
+#### ./Dockerfile ####
+FROM golang:1.23rc1-alpine3.20 AS modules
+COPY go.mod go.sum /modules/
+WORKDIR /modules
+RUN go mod download
+
+# Step 2: Builder
+FROM golang:1.23rc1-alpine3.20 AS builder
+COPY --from=modules /go/pkg /go/pkg
+COPY . /app
+WORKDIR /app
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -o /bin/app .
+
+# Step 3: Final
+FROM alpine:latest
+COPY --from=builder /app/config /config
+COPY --from=builder /app/migrations /migrations
+COPY --from=builder /bin/app /app
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+EXPOSE 8080
+CMD ["/app"]
+
+
+#### ./Makefile ####
+DB_URL := "postgres://postgres:nodirbek@localhost:5432/ecodb?sslmode=disable"
+
+run:
+	go run cmd/main.go
+
+swag-gen:
+	swag init -g api/router.go -o api/docs
+
+create-migration:
+	migrate create -ext sql -dir migrations -seq tables_up
+
+migrate-up:
+	migrate -path migrations -database "${DB_URL}" -verbose up
+
+migrate-down:
+	migrate -path migrations -database "${DB_URL}" -verbose down
+
+migration-version:
+	migrate -database ${DB_URL} -path migrations version 
+
+migrate-dirty:
+	migrate -path ./migrations/ -database ${DB_URL} force "$(number)"
+
+#### ./migrations/000001_tables_up.up.sql ####
+CREATE TABLE users (
+    id BIGINT PRIMARY KEY,
+    first_name VARCHAR(255) NOT NULL,
+    last_name VARCHAR(255) NOT NULL,
+    avatar TEXT,
+    birth_date TIMESTAMP,
+    location TEXT,
+    phone_number VARCHAR(20),
+    xp BIGINT NOT NULL DEFAULT 0,
+    region TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE events (
+    id UUID PRIMARY KEY,
+    image TEXT,
+    name TEXT NOT NULL,
+    description TEXT,
+    total_xp BIGINT NOT NULL DEFAULT 0,
+    start_date TIMESTAMP NOT NULL,
+    end_date TIMESTAMP NOT NULL,
+    resp_officer VARCHAR(255) NOT NULL,
+    resp_officer_image TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE history (
+    id UUID PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id),
+    event_id UUID NOT NULL REFERENCES events(id),
+    start_date TIMESTAMP NOT NULL,
+    end_date TIMESTAMP NOT NULL,
+    xp_earned BIGINT NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS market(
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    count BIGINT NOT NULL,
+    xp BIGINT NOT NULL,
+    category_name TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO market (name, description, count, xp, category_name) VALUES
+('MacBook Pro', 'Apple MacBook Pro 16-inch', 50, 1000, 'Electronics'),
+('iPhone 13', 'Apple iPhone 13 128GB', 200, 800, 'Electronics'),
+('Samsung Galaxy S21', 'Samsung Galaxy S21 256GB', 150, 750, 'Electronics'),
+('Dell XPS 13', 'Dell XPS 13 Laptop', 100, 900, 'Electronics'),
+('Sony WH-1000XM4', 'Sony Noise Cancelling Headphones', 300, 400, 'Accessories'),
+('Apple Watch Series 7', 'Apple Watch Series 7 45mm', 250, 500, 'Wearables'),
+('iPad Pro', 'Apple iPad Pro 12.9-inch', 80, 950, 'Tablets'),
+('Google Pixel 6', 'Google Pixel 6 128GB', 180, 700, 'Electronics'),
+('Amazon Echo Dot', 'Amazon Echo Dot 4th Gen', 400, 200, 'Smart Home'),
+('Nintendo Switch', 'Nintendo Switch Console', 120, 600, 'Gaming');
+
+
+
+INSERT INTO users (id, first_name, last_name, avatar, birth_date, location, phone_number, xp)
+VALUES
+    (1, 'John', 'Doe', 'avatar1.png', '1990-01-01', 'New York', '1234567890', 100),
+    (2, 'Jane', 'Smith', 'avatar2.png', '1992-02-02', 'Los Angeles', '0987654321', 200),
+    (3, 'Alice', 'Johnson', 'avatar3.png', '1985-03-03', 'Chicago', '1122334455', 150),
+    (4, 'Bob', 'Brown', 'avatar4.png', '1988-04-04', 'Houston', '5566778899', 120),
+    (5, 'Charlie', 'Davis', 'avatar5.png', '1995-05-05', 'Phoenix', '6677889900', 80),
+    (6, 'Daisy', 'Wilson', 'avatar6.png', '1991-06-06', 'Philadelphia', '3344556677', 90),
+    (7, 'Ethan', 'Martinez', 'avatar7.png', '1993-07-07', 'San Antonio', '4455667788', 110),
+    (8, 'Fiona', 'Garcia', 'avatar8.png', '1987-08-08', 'San Diego', '5566778899', 130),
+    (9, 'George', 'Lee', 'avatar9.png', '1994-09-09', 'Dallas', '6677889900', 140),
+    (10, 'Hannah', 'Walker', 'avatar10.png', '1996-10-10', 'San Jose', '7788990011', 70);
+
+INSERT INTO events (id, name, description, total_xp, start_date, end_date, resp_officer, resp_officer_image)
+VALUES
+    ('e1a0f4a6-dc77-4e5a-bb56-f03339d8d4f5', 'Tree Planting', 'Community tree planting event', 50, '2024-08-01', '2024-08-01', 'Alice Green', 'alice_green.png'),
+    ('f2a5e2b8-4134-4f7b-b44e-a0e8e01e90c6', 'Beach Clean-up', 'Clean-up event at the local beach', 70, '2024-08-15', '2024-08-15', 'Bob White', 'bob_white.png'),
+    ('c3b2c5d9-527e-4e0b-9c3e-e28e98a5b849', 'Recycling Workshop', 'Workshop on recycling techniques', 30, '2024-09-01', '2024-09-01', 'Carol Black', 'carol_black.png'),
+    ('d4c3d6ea-6389-4f8b-ac4f-14a2b1b7d90a', 'Wildlife Conservation', 'Awareness event on wildlife conservation', 60, '2024-09-15', '2024-09-15', 'David Gray', 'david_gray.png'),
+    ('e5d4e7fb-748e-4f9c-8d5f-25b3c2c8e1a1', 'Energy Saving', 'Event on energy-saving methods', 40, '2024-10-01', '2024-10-01', 'Eva Blue', 'eva_blue.png'),
+    ('f6e7f8a9-789b-4d9c-a2b3-d4e5f6a7b8c9', 'Water Conservation', 'Workshop on water-saving techniques', 45, '2024-10-15', '2024-10-15', 'Frank Orange', 'frank_orange.png'),
+    ('a1b2c3d4-5678-9e0f-1a2b-3c4d5e6f7a8b', 'Sustainable Living', 'Seminar on sustainable living practices', 55, '2024-11-01', '2024-11-01', 'Grace Pink', 'grace_pink.png'),
+    ('b2c3d4e5-6789-0f1a-2b3c-4d5e6f7a8b9c', 'Eco-Friendly Products', 'Expo of eco-friendly products', 65, '2024-11-15', '2024-11-15', 'Henry Cyan', 'henry_cyan.png'),
+    ('c3d4e5f6-7890-1a2b-3c4d-5e6f7a8b9c0d', 'Renewable Energy', 'Conference on renewable energy sources', 75, '2024-12-01', '2024-12-01', 'Ivy Lavender', 'ivy_lavender.png'),
+    ('d4e5f6a7-8901-2b3c-4d5e-6f7a8b9c0d1e', 'Climate Change Awareness', 'Campaign on climate change awareness', 80, '2024-12-15', '2024-12-15', 'Jack Indigo', 'jack_indigo.png');
+
+INSERT INTO history (id, user_id, event_id, start_date, end_date, xp_earned)
+VALUES
+    ('c3d4e5f6-7890-1a2b-3c4d-5e6f7a8b9c0d', 1, 'e1a0f4a6-dc77-4e5a-bb56-f03339d8d4f5', '2024-08-01', '2024-08-01', 50),
+    ('c3d4e5f6-7890-1a2b-3c4d-5e6f7a8b9c1d', 2, 'f2a5e2b8-4134-4f7b-b44e-a0e8e01e90c6', '2024-08-15', '2024-08-15', 70),
+    ('c3d4e5f6-7890-1a2b-3c4d-5e6f7a8b9c2d', 3, 'c3b2c5d9-527e-4e0b-9c3e-e28e98a5b849', '2024-09-01', '2024-09-01', 30),
+    ('c3d4e5f6-7890-1a2b-3c4d-5e6f7a8b9c4d', 4, 'd4c3d6ea-6389-4f8b-ac4f-14a2b1b7d90a', '2024-09-15', '2024-09-15', 60),
+    ('c3d4e5f6-7890-1a2b-3c4d-5e6f7a8b9c5d', 5, 'e5d4e7fb-748e-4f9c-8d5f-25b3c2c8e1a1', '2024-10-01', '2024-10-01', 40),
+    ('c3d4e5f6-7890-1a2b-3c4d-5e6f7a8b9c6d', 6, 'f6e7f8a9-789b-4d9c-a2b3-d4e5f6a7b8c9', '2024-10-15', '2024-10-15', 45),
+    ('c3d4e5f6-7890-1a2b-3c4d-5e6f7a8b9c7d', 7, 'a1b2c3d4-5678-9e0f-1a2b-3c4d5e6f7a8b', '2024-11-01', '2024-11-01', 55),
+    ('c3d4e5f6-7890-1a2b-3c4d-5e6f7a8b9c8d', 8, 'b2c3d4e5-6789-0f1a-2b3c-4d5e6f7a8b9c', '2024-11-15', '2024-11-15', 65),
+    ('c3d4e5f6-7890-1a2b-3c4d-5e6f7a8b9c9d', 9, 'c3d4e5f6-7890-1a2b-3c4d-5e6f7a8b9c0d', '2024-12-01', '2024-12-01', 75),
+    ('c3d4e5f6-7890-1a2b-3c4d-5e6f7a869c0d', 10, 'd4e5f6a7-8901-2b3c-4d5e-6f7a8b9c0d1e', '2024-12-15', '2024-12-15', 80);
+
+
+
+
+
+#### ./migrations/000001_tables_up.down.sql ####
+DROP TABLE IF EXISTS history;
+
+DROP TABLE IF EXISTS events;
+
+DROP TABLE IF EXISTS users;
+
+

@@ -6,7 +6,7 @@ definitions:
       difficulty:
         type: string
       id:
-        type: string
+        type: integer
     type: object
   models.Event:
     properties:

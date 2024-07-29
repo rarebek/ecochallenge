@@ -115,6 +115,7 @@ func main() {
 	r.PUT("/market/:id", h.UpdateMarket)
 	r.DELETE("/market/:id", h.DeleteMarket)
 	r.GET("/market", h.ListMarkets)
+	r.POST("/xp", h.EarnXP)
 
 	// Swagger documentation
 	url := ginSwagger.URL("swagger/doc.json")

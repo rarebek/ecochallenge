@@ -316,19 +316,21 @@ func (h *HandlerV1) EarnXP(c *gin.Context) {
 	var xp models.EarnXP
 	if err := c.ShouldBindJSON(&xp); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		pp.Println(err.Error())
 		return
 	}
 
 	var maxXP int
 	switch xp.Difficulty {
-	case "easy":
+	case "EASY":
 		maxXP = 5
-	case "medium":
+	case "MEDIUM":
 		maxXP = 10
-	case "hard":
+	case "HARD":
 		maxXP = 15
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid difficulty level"})
+		pp.Print(xp.Difficulty)
 		return
 	}
 
@@ -340,6 +342,7 @@ func (h *HandlerV1) EarnXP(c *gin.Context) {
 	_, err := h.db.Exec(query, totalXP, xp.Id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update XP"})
+		pp.Println(err.Error())
 		return
 	}
 
@@ -468,7 +471,7 @@ func (h *HandlerV1) ListUsers(c *gin.Context) {
 	}
 
 	for key := range users {
-		users[key].Avatar = "https://i.pravatar.cc/150?img=" + strconv.Itoa(users[key].ID)
+		users[key].Avatar = "https://i.pravatar.cc/150?img=" + strconv.Itoa(users[key].ID+3)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"users": users})

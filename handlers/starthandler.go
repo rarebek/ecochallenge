@@ -136,7 +136,7 @@ func sendWebAppButton(c telebot.Context, b *telebot.Bot, userID int) {
 	btnWebApp := telebot.InlineButton{
 		Text: "Open Web App",
 		WebApp: &telebot.WebApp{
-			URL: "https://a3d4-185-213-229-5.ngrok-free.app",
+			URL: "https://70f0-178-218-201-219.ngrok-free.app",
 		},
 	}
 
